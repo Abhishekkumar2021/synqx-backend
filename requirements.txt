@@ -1,0 +1,62 @@
+# Core Framework
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+# Database - System DB
+sqlalchemy
+alembic
+psycopg2-binary
+
+# Database - Supported Drivers
+pymysql
+pymssql
+oracledb
+pymongo
+redis
+
+# Cloud/Data Warehouse Connectors
+snowflake-connector-python
+snowflake-sqlalchemy
+google-cloud-bigquery
+
+# Task Queue (keeping Celery as alternative to Prefect)
+celery
+flower
+kombu
+
+# Security & Encryption
+cryptography
+python-multipart
+
+# Data Processing
+pandas
+polars
+pyarrow
+duckdb
+
+# Singer Protocol (Meltano-style connectors)
+singer-python
+
+# Workflow Orchestration
+prefect
+
+# Utilities
+python-dotenv
+httpx
+websockets
+structlog
+
+# Development & Testing
+pytest
+pytest-asyncio
+black
+ruff
+mypy
+
+# File Format Support
+fastparquet
+avro-python3
+openpyxl
+xlrd
