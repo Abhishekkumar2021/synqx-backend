@@ -36,7 +36,7 @@ def execute_pipeline_task(self, job_id: int) -> str:
             job.started_at = datetime.now(timezone.utc)
             session.commit()
             
-            DBLogger.log_job(session, job.id, "INFO", "Job started.", source="worker")
+            DBLogger.log_job(session, job.id, "INFO", "Job started.", source="worker", tenant_id=job.tenant_id)
 
             # 2. Retrieve Pipeline Version
             pipeline_version = session.query(PipelineVersion).filter(
@@ -50,7 +50,7 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 job.status = JobStatus.FAILED
                 job.infra_error = error_msg
                 job.completed_at = datetime.now(timezone.utc)
-                DBLogger.log_job(session, job.id, "ERROR", error_msg, source="worker")
+                DBLogger.log_job(session, job.id, "ERROR", error_msg, source="worker", tenant_id=job.tenant_id)
                 session.commit()
                 return error_msg
 
@@ -62,9 +62,9 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 runner.run(pipeline_version, session, job_id=job.id)
                 
                 # If we get here, the run was successful
-                job.status = JobStatus.COMPLETED
+                job.status = JobStatus.SUCCESS
                 job.completed_at = datetime.now(timezone.utc)
-                DBLogger.log_job(session, job.id, "INFO", "Job completed successfully.", source="worker")
+                DBLogger.log_job(session, job.id, "INFO", "Job completed successfully.", source="worker", tenant_id=job.tenant_id)
                 session.commit()
                 logger.info(f"Job ID {job_id} completed successfully.")
                 return f"Job ID {job_id} completed successfully."
@@ -74,7 +74,7 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 job.status = JobStatus.FAILED
                 job.infra_error = str(e)
                 job.completed_at = datetime.now(timezone.utc)
-                DBLogger.log_job(session, job.id, "ERROR", f"Pipeline execution failed: {e}", source="worker")
+                DBLogger.log_job(session, job.id, "ERROR", f"Pipeline execution failed: {e}", source="worker", tenant_id=job.tenant_id)
                 session.commit()
                 # Re-raise to ensure Celery marks the task as failed
                 raise e
