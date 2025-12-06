@@ -1,86 +1,563 @@
-from typing import Optional, Dict
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional, List
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from sqlalchemy.orm import Session
 
-from app.schemas.pipeline import PipelineCreate, PipelineRead, PipelineVersionRead
+from app.schemas.pipeline import (
+    PipelineCreate,
+    PipelineRead,
+    PipelineUpdate,
+    PipelineDetailRead,
+    PipelineListResponse,
+    PipelineVersionRead,
+    PipelineVersionSummary,
+    PipelineTriggerRequest,
+    PipelineTriggerResponse,
+    PipelinePublishRequest,
+    PipelinePublishResponse,
+    PipelineValidationResponse,
+    PipelineStatsResponse,
+)
 from app.services.pipeline_service import PipelineService
-from app.api.deps import get_db
-from app.core.errors import AppError
+from app.api.deps import get_db, get_current_tenant_id
+from app.core.errors import AppError, ConfigurationError
 from app.core.logging import get_logger
+from app.models.enums import PipelineStatus
 
 router = APIRouter()
 logger = get_logger(__name__)
 
-# Placeholder for tenant_id. In a real app, this would come from authentication/session.
-CURRENT_TENANT_ID = 1
 
-@router.post("/", response_model=PipelineRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    response_model=PipelineDetailRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create Pipeline",
+    description="Creates a new pipeline with its initial version, nodes, and edges",
+)
 def create_pipeline(
     pipeline_create: PipelineCreate,
-    db: Session = Depends(get_db)
+    validate_dag: bool = Query(
+        True, description="Validate DAG structure before creation"
+    ),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
 ):
-    """
-    Creates a new pipeline with its initial version.
-    """
     try:
         service = PipelineService(db)
-        pipeline = service.create_pipeline(pipeline_create, tenant_id=CURRENT_TENANT_ID)
-        
-        # Optionally load the current version details for the response
-        if pipeline.published_version_id:
-            version_detail = service.get_pipeline_version(pipeline.id, pipeline.published_version_id, CURRENT_TENANT_ID)
-            pipeline_read = PipelineRead.model_validate(pipeline)
-            pipeline_read.current_version_detail = PipelineVersionRead.model_validate(version_detail) if version_detail else None
-        else:
-            pipeline_read = PipelineRead.model_validate(pipeline)
+        pipeline = service.create_pipeline(
+            pipeline_create, tenant_id=tenant_id, validate_dag=validate_dag
+        )
 
-        return pipeline_read
+        response = PipelineDetailRead.model_validate(pipeline)
+
+        if pipeline.published_version_id:
+            version_detail = service.get_pipeline_version(
+                pipeline.id, pipeline.published_version_id, tenant_id
+            )
+            if version_detail:
+                response.published_version = PipelineVersionRead.model_validate(
+                    version_detail
+                )
+
+        return response
+
+    except ConfigurationError as e:
+        logger.error(f"Configuration error creating pipeline: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "Configuration error", "message": str(e)},
+        )
     except AppError as e:
         logger.error(f"Error creating pipeline: {e}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
     except Exception as e:
-        logger.error(f"Unexpected error creating pipeline: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")
+        logger.error(f"Unexpected error creating pipeline: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "An unexpected error occurred",
+            },
+        )
 
 
-@router.get("/{pipeline_id}", response_model=PipelineRead)
-def get_pipeline(
-    pipeline_id: int,
-    db: Session = Depends(get_db)
+@router.get(
+    "/",
+    response_model=PipelineListResponse,
+    summary="List Pipelines",
+    description="List all pipelines for the current tenant with optional filtering",
+)
+def list_pipelines(
+    status_filter: Optional[PipelineStatus] = Query(
+        None, description="Filter by pipeline status"
+    ),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of results"),
+    offset: int = Query(0, ge=0, description="Number of results to skip"),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
 ):
-    """
-    Retrieves a pipeline by its ID.
-    """
-    service = PipelineService(db)
-    pipeline = service.get_pipeline(pipeline_id, tenant_id=CURRENT_TENANT_ID)
-    if not pipeline:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
-    
-    # Load current version details for the response
-    pipeline_read = PipelineRead.model_validate(pipeline)
-    if pipeline.published_version_id:
-        version_detail = service.get_pipeline_version(pipeline.id, pipeline.published_version_id, CURRENT_TENANT_ID)
-        pipeline_read.current_version_detail = PipelineVersionRead.model_validate(version_detail) if version_detail else None
-
-    return pipeline_read
-
-@router.post("/{pipeline_id}/run", response_model=Dict[str, str])
-def trigger_pipeline_run(
-    pipeline_id: int,
-    version_id: Optional[int] = None,
-    db: Session = Depends(get_db)
-):
-    """
-    Triggers an immediate run for a specified pipeline version.
-    If version_id is not provided, the currently published version will be used.
-    """
     try:
         service = PipelineService(db)
-        result = service.trigger_pipeline_run(pipeline_id, CURRENT_TENANT_ID, version_id)
-        return result
-    except AppError as e:
-        logger.error(f"Error triggering pipeline run for {pipeline_id} (version {version_id}): {e}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        pipelines = service.list_pipelines(
+            tenant_id=tenant_id, status=status_filter, limit=limit, offset=offset
+        )
+
+        total = len(pipelines)
+
+        return PipelineListResponse(
+            pipelines=[PipelineRead.model_validate(p) for p in pipelines],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
     except Exception as e:
-        logger.error(f"Unexpected error triggering pipeline run for {pipeline_id} (version {version_id}): {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred during pipeline run.")
+        logger.error(f"Error listing pipelines: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to list pipelines",
+            },
+        )
+
+
+@router.get(
+    "/{pipeline_id}",
+    response_model=PipelineDetailRead,
+    summary="Get Pipeline",
+    description="Retrieve a pipeline by ID with its published version details",
+)
+def get_pipeline(
+    pipeline_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    service = PipelineService(db)
+    pipeline = service.get_pipeline(pipeline_id, tenant_id=tenant_id)
+
+    if not pipeline:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "Not found",
+                "message": f"Pipeline {pipeline_id} not found",
+            },
+        )
+
+    response = PipelineDetailRead.model_validate(pipeline)
+
+    if pipeline.published_version_id:
+        version_detail = service.get_pipeline_version(
+            pipeline.id, pipeline.published_version_id, tenant_id
+        )
+        if version_detail:
+            response.published_version = PipelineVersionRead.model_validate(
+                version_detail
+            )
+
+    if pipeline.versions:
+        response.versions = [
+            PipelineVersionSummary(
+                id=v.id,
+                version=v.version,
+                is_published=v.is_published,
+                published_at=v.published_at,
+                node_count=len(v.nodes) if v.nodes else 0,
+                edge_count=len(v.edges) if v.edges else 0,
+                created_at=v.created_at,
+            )
+            for v in pipeline.versions[:10]
+        ]
+
+    return response
+
+
+@router.patch(
+    "/{pipeline_id}",
+    response_model=PipelineRead,
+    summary="Update Pipeline",
+    description="Update pipeline metadata (not version/nodes/edges)",
+)
+def update_pipeline(
+    pipeline_id: int,
+    pipeline_update: PipelineUpdate,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    try:
+        service = PipelineService(db)
+        pipeline = service.update_pipeline(pipeline_id, pipeline_update, tenant_id)
+        return PipelineRead.model_validate(pipeline)
+
+    except AppError as e:
+        logger.error(f"Error updating pipeline {pipeline_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(
+            f"Unexpected error updating pipeline {pipeline_id}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to update pipeline",
+            },
+        )
+
+
+@router.delete(
+    "/{pipeline_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete Pipeline",
+    description="Soft delete a pipeline (marks as deleted, doesn't remove from database)",
+)
+def delete_pipeline(
+    pipeline_id: int,
+    hard_delete: bool = Query(False, description="Permanently delete from database"),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    try:
+        service = PipelineService(db)
+        service.delete_pipeline(pipeline_id, tenant_id, hard_delete=hard_delete)
+        return None
+
+    except AppError as e:
+        logger.error(f"Error deleting pipeline {pipeline_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(
+            f"Unexpected error deleting pipeline {pipeline_id}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to delete pipeline",
+            },
+        )
+
+
+@router.post(
+    "/{pipeline_id}/trigger",
+    response_model=PipelineTriggerResponse,
+    summary="Trigger Pipeline Run",
+    description="Trigger an immediate execution of the pipeline",
+)
+def trigger_pipeline_run(
+    pipeline_id: int,
+    trigger_request: PipelineTriggerRequest = Body(...),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    try:
+        service = PipelineService(db)
+        result = service.trigger_pipeline_run(
+            pipeline_id=pipeline_id,
+            tenant_id=tenant_id,
+            version_id=trigger_request.version_id,
+            async_execution=trigger_request.async_execution,
+            run_params=trigger_request.run_params,
+        )
+
+        return PipelineTriggerResponse(
+            status=result["status"],
+            message=result["message"],
+            job_id=result["job_id"],
+            task_id=result.get("task_id"),
+            pipeline_id=pipeline_id,
+            version_id=trigger_request.version_id or 0,
+        )
+
+    except AppError as e:
+        logger.error(f"Error triggering pipeline {pipeline_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(
+            f"Unexpected error triggering pipeline {pipeline_id}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to trigger pipeline run",
+            },
+        )
+
+
+@router.get(
+    "/{pipeline_id}/versions",
+    response_model=List[PipelineVersionSummary],
+    summary="List Pipeline Versions",
+    description="Get all versions of a pipeline",
+)
+def list_pipeline_versions(
+    pipeline_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    service = PipelineService(db)
+    pipeline = service.get_pipeline(pipeline_id, tenant_id)
+
+    if not pipeline:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "Not found",
+                "message": f"Pipeline {pipeline_id} not found",
+            },
+        )
+
+    if not pipeline.versions:
+        return []
+
+    return [
+        PipelineVersionSummary(
+            id=v.id,
+            version=v.version,
+            is_published=v.is_published,
+            published_at=v.published_at,
+            node_count=len(v.nodes) if v.nodes else 0,
+            edge_count=len(v.edges) if v.edges else 0,
+            created_at=v.created_at,
+        )
+        for v in pipeline.versions
+    ]
+
+
+@router.get(
+    "/{pipeline_id}/versions/{version_id}",
+    response_model=PipelineVersionRead,
+    summary="Get Pipeline Version",
+    description="Get detailed information about a specific pipeline version",
+)
+def get_pipeline_version(
+    pipeline_id: int,
+    version_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    service = PipelineService(db)
+    version = service.get_pipeline_version(pipeline_id, version_id, tenant_id)
+
+    if not version:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "Not found",
+                "message": f"Version {version_id} not found for pipeline {pipeline_id}",
+            },
+        )
+
+    return PipelineVersionRead.model_validate(version)
+
+
+@router.post(
+    "/{pipeline_id}/versions/{version_id}/publish",
+    response_model=PipelinePublishResponse,
+    summary="Publish Pipeline Version",
+    description="Publish a specific version, making it the active version for execution",
+)
+def publish_pipeline_version(
+    pipeline_id: int,
+    version_id: int,
+    publish_request: PipelinePublishRequest = Body(...),
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    try:
+        service = PipelineService(db)
+        version = service.publish_version(pipeline_id, version_id, tenant_id)
+
+        return PipelinePublishResponse(
+            message=f"Version {version.version} published successfully",
+            version_id=version.id,
+            version_number=version.version,
+            published_at=version.published_at,
+        )
+
+    except AppError as e:
+        logger.error(
+            f"Error publishing version {version_id} for pipeline {pipeline_id}: {e}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error publishing version: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to publish version",
+            },
+        )
+
+
+@router.post(
+    "/{pipeline_id}/validate",
+    response_model=PipelineValidationResponse,
+    summary="Validate Pipeline Configuration",
+    description="Validate pipeline DAG structure and configuration without creating it",
+)
+def validate_pipeline(
+    pipeline_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    try:
+        service = PipelineService(db)
+        pipeline = service.get_pipeline(pipeline_id, tenant_id)
+
+        if not pipeline:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "Not found",
+                    "message": f"Pipeline {pipeline_id} not found",
+                },
+            )
+
+        version = service.get_pipeline_version(pipeline_id, None, tenant_id)
+
+        if not version:
+            return PipelineValidationResponse(
+                valid=False,
+                errors=[
+                    {
+                        "field": "version",
+                        "message": "No published version found",
+                        "error_type": "MissingVersion",
+                    }
+                ],
+            )
+
+        try:
+            service._validate_pipeline_configuration(version)
+            return PipelineValidationResponse(valid=True, errors=[], warnings=[])
+        except ConfigurationError as e:
+            return PipelineValidationResponse(
+                valid=False,
+                errors=[
+                    {
+                        "field": "configuration",
+                        "message": str(e),
+                        "error_type": "ConfigurationError",
+                    }
+                ],
+            )
+
+    except Exception as e:
+        logger.error(f"Error validating pipeline {pipeline_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to validate pipeline",
+            },
+        )
+
+
+@router.get(
+    "/{pipeline_id}/stats",
+    response_model=PipelineStatsResponse,
+    summary="Get Pipeline Statistics",
+    description="Get execution statistics for a pipeline",
+)
+def get_pipeline_stats(
+    pipeline_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: int = Depends(get_current_tenant_id),
+):
+    try:
+        from sqlalchemy import func
+        from app.models.execution import Job, PipelineRun
+        from app.models.enums import JobStatus
+
+        service = PipelineService(db)
+        pipeline = service.get_pipeline(pipeline_id, tenant_id)
+
+        if not pipeline:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "Not found",
+                    "message": f"Pipeline {pipeline_id} not found",
+                },
+            )
+
+        total_runs = (
+            db.query(func.count(Job.id)).filter(Job.pipeline_id == pipeline_id).scalar()
+            or 0
+        )
+
+        successful_runs = (
+            db.query(func.count(Job.id))
+            .filter(Job.pipeline_id == pipeline_id, Job.status == JobStatus.SUCCESS)
+            .scalar()
+            or 0
+        )
+
+        failed_runs = (
+            db.query(func.count(Job.id))
+            .filter(Job.pipeline_id == pipeline_id, Job.status == JobStatus.FAILED)
+            .scalar()
+            or 0
+        )
+
+        avg_duration = (
+            db.query(func.avg(Job.duration_seconds))
+            .filter(
+                Job.pipeline_id == pipeline_id,
+                Job.status == JobStatus.SUCCESS,
+                Job.duration_seconds.isnot(None),
+            )
+            .scalar()
+        )
+
+        last_run = (
+            db.query(Job.completed_at)
+            .filter(Job.pipeline_id == pipeline_id, Job.completed_at.isnot(None))
+            .order_by(Job.completed_at.desc())
+            .first()
+        )
+
+        next_scheduled_run = None
+        if pipeline.schedule_enabled and pipeline.schedule_cron:
+            next_scheduled_run = service.get_pipeline_next_run(pipeline_id)
+
+        return PipelineStatsResponse(
+            pipeline_id=pipeline_id,
+            total_runs=total_runs,
+            successful_runs=successful_runs,
+            failed_runs=failed_runs,
+            average_duration_seconds=float(avg_duration) if avg_duration else None,
+            last_run_at=last_run[0] if last_run else None,
+            next_scheduled_run=next_scheduled_run,
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Error getting stats for pipeline {pipeline_id}: {e}", exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to get pipeline statistics",
+            },
+        )

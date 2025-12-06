@@ -18,7 +18,7 @@ celery_app.conf.update(
     beat_schedule={
         "scheduler-heartbeat": {
             "task": "app.worker.tasks.scheduler_heartbeat",
-            "schedule": 60.0, # Run every 60 seconds
-        },
+            "schedule": 60.0,
+        }
     },
 )

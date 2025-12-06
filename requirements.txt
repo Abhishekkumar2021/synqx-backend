@@ -58,6 +58,6 @@ mypy
 
 # File Format Support
 fastparquet
-avro-python3
+fastavro
 openpyxl
 xlrd

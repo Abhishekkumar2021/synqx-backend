@@ -64,8 +64,11 @@ class OperatorType(str, enum.Enum):
     TRANSFORM = "transform"
     LOAD = "load"
     VALIDATE = "validate"
-    TRIGGER = "trigger"
     NOOP = "noop"
+
+    MERGE = "merge"
+    UNION = "union"
+    JOIN = "join"
 
 class OperatorRunStatus(str, enum.Enum):
     PENDING = "pending"

@@ -53,9 +53,3 @@ class ConnectorFactory:
             raise ConfigurationError(
                 f"Error instantiating connector type '{connector_type}': {e}"
             ) from e
-
-# Register built-in connectors here
-# This will be done in the __init__.py of the connectors package or similar central place
-# Example:
-# from app.connectors.impl.sql.postgres import PostgresConnector
-# ConnectorFactory.register_connector("postgres", PostgresConnector)
