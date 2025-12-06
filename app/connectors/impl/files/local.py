@@ -170,8 +170,13 @@ class LocalFileConnector(BaseConnector):
 
         except Exception as e:
             raise DataTransferError(f"Read failed: {e}")
-
-    # ---------------------------------------------------------
+    
+    def connect(self):
+        return super().connect()
+    
+    def disconnect(self):
+        return super().disconnect()
+    
     def _slice(self, df: pd.DataFrame, offset: Optional[int], limit: Optional[int]):
         if offset:
             df = df.iloc[offset:]

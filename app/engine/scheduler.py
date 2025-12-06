@@ -327,7 +327,6 @@ class Scheduler:
                 correlation_id=str(uuid.uuid4()),
                 status=JobStatus.PENDING,
                 retry_strategy=getattr(pipeline, "retry_strategy", None),
-                tenant_id=getattr(pipeline, "tenant_id", None),
             )
             self.db_session.add(job)
             self.db_session.flush()  # Get job.id before enqueueing

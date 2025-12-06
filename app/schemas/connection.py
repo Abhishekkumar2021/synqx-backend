@@ -55,7 +55,6 @@ class ConnectionRead(ConnectionBase):
     last_test_at: Optional[datetime]
     last_schema_discovery_at: Optional[datetime]
     error_message: Optional[str]
-    tenant_id: str
     created_at: datetime
     updated_at: datetime
     deleted_at: Optional[datetime] = None
@@ -98,7 +97,6 @@ class AssetSchemaVersionRead(AssetSchemaVersionBase):
     asset_id: int
     version: int
     discovered_at: datetime
-    tenant_id: str
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -152,7 +150,6 @@ class AssetRead(AssetBase):
     connection_id: int
     schema_metadata: Optional[Dict[str, Any]] = None
     current_schema_version: Optional[int] = None
-    tenant_id: str
     created_at: datetime
     updated_at: datetime
     deleted_at: Optional[datetime] = None

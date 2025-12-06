@@ -22,7 +22,7 @@ class BaseConnector(ABC):
         self.validate_config()
 
     @abstractmethod
-    def validate_config(self) -> None:
+    def validate_config(self, **kwargs) -> None:
         """
         Validate the configuration dictionary.
         Should raise ConfigurationError if invalid.
@@ -30,7 +30,7 @@ class BaseConnector(ABC):
         pass
 
     @abstractmethod
-    def connect(self) -> None:
+    def connect(self, **kwargs) -> None:
         """
         Establish the connection to the external system.
         Should raise ConnectionFailedError or AuthenticationError on failure.
@@ -38,14 +38,14 @@ class BaseConnector(ABC):
         pass
 
     @abstractmethod
-    def disconnect(self) -> None:
+    def disconnect(self, **kwargs) -> None:
         """
         Close the connection and release resources.
         """
         pass
 
     @abstractmethod
-    def test_connection(self) -> bool:
+    def test_connection(self, **kwargs) -> bool:
         """
         Test if the connection can be established successfully.
         Returns True if successful, raises an exception or returns False otherwise.
@@ -67,12 +67,9 @@ class BaseConnector(ABC):
         finally:
             self.disconnect()
 
-    # -------------------------------------------------------------------------
-    # Schema / Metadata
-    # -------------------------------------------------------------------------
 
     @abstractmethod
-    def list_assets(self) -> List[str]:
+    def list_assets(self, **kwargs) -> List[str]:
         """
         List available assets (tables, buckets, files) in the source.
         """

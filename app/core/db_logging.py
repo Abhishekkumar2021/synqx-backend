@@ -14,7 +14,7 @@ class DBLogger:
     """
 
     @staticmethod
-    def log_job(session: Session, job_id: int, level: str, message: str, metadata: Optional[Dict[str, Any]] = None, source: str = "system", tenant_id: str = "1"):
+    def log_job(session: Session, job_id: int, level: str, message: str, metadata: Optional[Dict[str, Any]] = None, source: str = "system"):
         """
         Writes a log entry to the job_logs table.
         """
@@ -26,7 +26,6 @@ class DBLogger:
                 metadata_payload=metadata,
                 timestamp=datetime.now(timezone.utc),
                 source=source,
-                tenant_id=tenant_id
             )
             session.add(log_entry)
             session.flush() # Flush to assign ID and ensure it's pending commit
@@ -35,7 +34,7 @@ class DBLogger:
             logger.error(f"Failed to write JobLog (Job {job_id}): {e}")
 
     @staticmethod
-    def log_step(session: Session, step_run_id: int, level: str, message: str, metadata: Optional[Dict[str, Any]] = None, source: str = "runner", tenant_id: str = "1"):
+    def log_step(session: Session, step_run_id: int, level: str, message: str, metadata: Optional[Dict[str, Any]] = None, source: str = "runner"):
         """
         Writes a log entry to the step_logs table.
         """
@@ -47,7 +46,6 @@ class DBLogger:
                 metadata_payload=metadata,
                 timestamp=datetime.now(timezone.utc),
                 source=source,
-                tenant_id=tenant_id
             )
             session.add(log_entry)
             session.flush()

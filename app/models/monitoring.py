@@ -119,7 +119,6 @@ class AlertConfig(Base, AuditMixin, SoftDeleteMixin):
     alerts: Mapped[list["Alert"]] = relationship("Alert", back_populates="config")
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "name", name="uq_alert_config_name_per_tenant"),
         Index("idx_alert_config_enabled", "enabled", "alert_type"),
     )
 

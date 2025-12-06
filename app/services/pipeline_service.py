@@ -34,14 +34,13 @@ class PipelineService:
         self.pipeline_runner = PipelineRunner()
 
     def create_pipeline(
-        self, pipeline_create: PipelineCreate, tenant_id: int, validate_dag: bool = True
+        self, pipeline_create: PipelineCreate, validate_dag: bool = True
     ) -> Pipeline:
         """
         Creates a new pipeline along with its initial version, nodes, and edges.
 
         Args:
             pipeline_create: Pipeline creation schema
-            tenant_id: Tenant identifier
             validate_dag: Whether to validate DAG structure before creation
 
         Returns:
@@ -52,7 +51,6 @@ class PipelineService:
             ConfigurationError: If pipeline configuration is invalid
         """
         try:
-            tenant_id_str = str(tenant_id)
 
             # Validate pipeline configuration before creation
             if validate_dag:
@@ -69,7 +67,6 @@ class PipelineService:
                 execution_timeout_seconds=pipeline_create.execution_timeout_seconds,
                 tags=pipeline_create.tags or [],
                 priority=pipeline_create.priority or 0,
-                tenant_id=tenant_id_str,
                 status=PipelineStatus.DRAFT,  # Start as draft
             )
             self.db_session.add(db_pipeline)
@@ -80,8 +77,7 @@ class PipelineService:
                 db_pipeline.id,
                 pipeline_create.initial_version,
                 version_number=1,
-                is_published=False,  # Don't auto-publish
-                tenant_id=tenant_id_str,
+                is_published=False,
             )
             self.db_session.add(db_version)
             self.db_session.flush()
@@ -93,7 +89,6 @@ class PipelineService:
             self._create_pipeline_nodes(
                 db_version.id,
                 pipeline_create.initial_version.nodes,
-                tenant_id=tenant_id_str,
             )
             self.db_session.flush()  # Flush nodes before edges
 
@@ -101,7 +96,6 @@ class PipelineService:
             self._create_pipeline_edges(
                 db_version.id,
                 pipeline_create.initial_version.edges,
-                tenant_id=tenant_id_str,
             )
 
             self.db_session.commit()
@@ -112,7 +106,6 @@ class PipelineService:
                 extra={
                     "pipeline_id": db_pipeline.id,
                     "pipeline_name": db_pipeline.name,
-                    "tenant_id": tenant_id_str,
                 },
             )
 
@@ -141,12 +134,12 @@ class PipelineService:
             raise AppError(f"Failed to create pipeline: {e}") from e
 
     def update_pipeline(
-        self, pipeline_id: int, pipeline_update: PipelineUpdate, tenant_id: int
+        self, pipeline_id: int, pipeline_update: PipelineUpdate
     ) -> Pipeline:
         """
         Update pipeline metadata (not version/nodes/edges).
         """
-        pipeline = self.get_pipeline(pipeline_id, tenant_id)
+        pipeline = self.get_pipeline(pipeline_id)
         if not pipeline:
             raise AppError(f"Pipeline {pipeline_id} not found")
 
@@ -173,14 +166,12 @@ class PipelineService:
             logger.error(f"Failed to update pipeline {pipeline_id}: {e}")
             raise AppError(f"Failed to update pipeline: {e}") from e
 
-    def publish_version(
-        self, pipeline_id: int, version_id: int, tenant_id: int
-    ) -> PipelineVersion:
+    def publish_version(self, pipeline_id: int, version_id: int) -> PipelineVersion:
         """
         Publish a specific pipeline version, making it the active version.
         Unpublishes any previously published version.
         """
-        pipeline = self.get_pipeline(pipeline_id, tenant_id)
+        pipeline = self.get_pipeline(pipeline_id)
         if not pipeline:
             raise AppError(f"Pipeline {pipeline_id} not found")
 
@@ -229,14 +220,13 @@ class PipelineService:
             logger.error(f"Failed to publish version: {e}")
             raise AppError(f"Failed to publish version: {e}") from e
 
-    def get_pipeline(self, pipeline_id: int, tenant_id: int) -> Optional[Pipeline]:
+    def get_pipeline(self, pipeline_id: int) -> Optional[Pipeline]:
         """Retrieves a pipeline by its ID."""
         return (
             self.db_session.query(Pipeline)
             .filter(
                 and_(
                     Pipeline.id == pipeline_id,
-                    Pipeline.tenant_id == str(tenant_id),
                     Pipeline.deleted_at.is_(None),
                 )
             )
@@ -245,15 +235,12 @@ class PipelineService:
 
     def list_pipelines(
         self,
-        tenant_id: int,
         status: Optional[PipelineStatus] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> List[Pipeline]:
         """List pipelines for a tenant with optional filtering."""
-        query = self.db_session.query(Pipeline).filter(
-            and_(Pipeline.tenant_id == str(tenant_id), Pipeline.deleted_at.is_(None))
-        )
+        query = self.db_session.query(Pipeline).filter(Pipeline.deleted_at.is_(None))
 
         if status:
             query = query.filter(Pipeline.status == status)
@@ -263,7 +250,7 @@ class PipelineService:
         )
 
     def get_pipeline_version(
-        self, pipeline_id: int, version_id: Optional[int] = None, tenant_id: int = None
+        self, pipeline_id: int, version_id: Optional[int] = None
     ) -> Optional[PipelineVersion]:
         """
         Retrieves a specific pipeline version or the currently published one.
@@ -274,7 +261,6 @@ class PipelineService:
             .filter(
                 and_(
                     Pipeline.id == pipeline_id,
-                    Pipeline.tenant_id == str(tenant_id),
                     Pipeline.deleted_at.is_(None),
                 )
             )
@@ -290,7 +276,6 @@ class PipelineService:
     def trigger_pipeline_run(
         self,
         pipeline_id: int,
-        tenant_id: int,
         version_id: Optional[int] = None,
         async_execution: bool = True,
         run_params: Optional[Dict[str, Any]] = None,
@@ -300,7 +285,6 @@ class PipelineService:
 
         Args:
             pipeline_id: ID of the pipeline to run
-            tenant_id: Tenant identifier
             version_id: Specific version to run (defaults to published version)
             async_execution: If True, enqueue task; if False, run synchronously
             run_params: Optional runtime parameters
@@ -308,7 +292,7 @@ class PipelineService:
         Returns:
             Dictionary with job information
         """
-        pipeline = self.get_pipeline(pipeline_id, tenant_id)
+        pipeline = self.get_pipeline(pipeline_id)
         if not pipeline:
             raise AppError(f"Pipeline {pipeline_id} not found")
 
@@ -331,7 +315,7 @@ class PipelineService:
                     f"Currently {active_jobs_count} jobs running."
                 )
 
-        pipeline_version = self.get_pipeline_version(pipeline_id, version_id, tenant_id)
+        pipeline_version = self.get_pipeline_version(pipeline_id, version_id)
         if not pipeline_version:
             raise AppError(
                 f"Pipeline version not found for pipeline {pipeline_id}, version {version_id}"
@@ -343,7 +327,6 @@ class PipelineService:
             pipeline_version_id=pipeline_version.id,
             correlation_id=str(uuid.uuid4()),
             status=JobStatus.PENDING,
-            tenant_id=str(tenant_id),
             config_override=run_params,
         )
         self.db_session.add(job)
@@ -419,13 +402,11 @@ class PipelineService:
 
             raise AppError(f"Failed to trigger pipeline run: {e}") from e
 
-    def delete_pipeline(
-        self, pipeline_id: int, tenant_id: int, hard_delete: bool = False
-    ) -> bool:
+    def delete_pipeline(self, pipeline_id: int, hard_delete: bool = False) -> bool:
         """
         Delete a pipeline (soft delete by default).
         """
-        pipeline = self.get_pipeline(pipeline_id, tenant_id)
+        pipeline = self.get_pipeline(pipeline_id)
         if not pipeline:
             raise AppError(f"Pipeline {pipeline_id} not found")
 
@@ -506,7 +487,6 @@ class PipelineService:
         version_data: PipelineVersionCreate,
         version_number: int,
         is_published: bool,
-        tenant_id: str,
     ) -> PipelineVersion:
         """Helper to create a PipelineVersion object."""
         return PipelineVersion(
@@ -517,14 +497,12 @@ class PipelineService:
             version_notes=version_data.version_notes,
             is_published=is_published,
             published_at=datetime.now(timezone.utc) if is_published else None,
-            tenant_id=tenant_id,
         )
 
     def _create_pipeline_nodes(
         self,
         pipeline_version_id: int,
         nodes_data: List[PipelineNodeCreate],
-        tenant_id: str,
     ) -> None:
         """Helper to create PipelineNode objects."""
         for node_data in nodes_data:
@@ -541,7 +519,6 @@ class PipelineService:
                 destination_asset_id=node_data.destination_asset_id,
                 max_retries=node_data.max_retries or 0,
                 timeout_seconds=node_data.timeout_seconds,
-                tenant_id=tenant_id,
             )
             self.db_session.add(db_node)
 
@@ -549,7 +526,6 @@ class PipelineService:
         self,
         pipeline_version_id: int,
         edges_data: List[PipelineEdgeCreate],
-        tenant_id: str,
     ) -> None:
         """Helper to create PipelineEdge objects."""
         for edge_data in edges_data:
@@ -562,7 +538,6 @@ class PipelineService:
                     pipeline_version_id, edge_data.to_node_id
                 ),
                 edge_type=edge_data.edge_type,
-                tenant_id=tenant_id,
             )
             self.db_session.add(db_edge)
 

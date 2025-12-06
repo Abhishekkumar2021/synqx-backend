@@ -3,7 +3,6 @@ from app.models.base import (
     Base, 
     TimestampMixin, 
     UserTrackingMixin, 
-    TenantMixin, 
     AuditMixin, 
     SoftDeleteMixin
 )
@@ -33,7 +32,6 @@ __all__ = [
     "Base",
     "TimestampMixin",
     "UserTrackingMixin",
-    "TenantMixin",
     "AuditMixin",
     "SoftDeleteMixin",
     

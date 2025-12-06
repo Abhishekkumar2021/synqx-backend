@@ -96,7 +96,6 @@ class PipelineRunner:
             order_index=node.order_index,
             status=OperatorRunStatus.RUNNING,
             started_at=datetime.now(timezone.utc),
-            tenant_id=pipeline_run.tenant_id,
         )
         db.add(step_run)
         db.flush()
@@ -106,7 +105,6 @@ class PipelineRunner:
             step_run.id,
             "INFO",
             f"Node '{node.name}' started.",
-            tenant_id=pipeline_run.tenant_id,
         )
 
         try:
@@ -238,7 +236,6 @@ class PipelineRunner:
                 step_run.id,
                 "INFO",
                 f"Completed. In={records_in}, Out={records_out}",
-                tenant_id=pipeline_run.tenant_id,
             )
 
             return transformed
@@ -259,7 +256,6 @@ class PipelineRunner:
                 step_run.id,
                 "ERROR",
                 f"Step failed: {e}",
-                tenant_id=pipeline_run.tenant_id,
             )
             logger.error("Node failed", node=node.node_id, error=str(e))
             raise
@@ -287,7 +283,6 @@ class PipelineRunner:
             run_number=next_run,
             status=PipelineRunStatus.RUNNING,
             started_at=datetime.now(timezone.utc),
-            tenant_id=pipeline_version.tenant_id,
         )
         db.add(pipeline_run)
         db.flush()
@@ -299,7 +294,6 @@ class PipelineRunner:
             f"PipelineRun {next_run} started.",
             metadata={"pipeline_run_id": pipeline_run.id},
             source="runner",
-            tenant_id=pipeline_run.tenant_id,
         )
 
         try:
@@ -356,7 +350,6 @@ class PipelineRunner:
                 f"PipelineRun {next_run} succeeded.",
                 metadata={"pipeline_run_id": pipeline_run.id},
                 source="runner",
-                tenant_id=pipeline_run.tenant_id,
             )
 
         except Exception as e:
@@ -381,7 +374,6 @@ class PipelineRunner:
                 f"PipelineRun {next_run} failed: {e}",
                 metadata={"pipeline_run_id": pipeline_run.id},
                 source="runner",
-                tenant_id=pipeline_run.tenant_id,
             )
             raise
 

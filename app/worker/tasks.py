@@ -89,7 +89,6 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 "INFO",
                 f"Job started (attempt {self.request.retries + 1})",
                 source="worker",
-                tenant_id=job.tenant_id,
             )
 
             # Fetch pipeline version
@@ -144,7 +143,6 @@ def execute_pipeline_task(self, job_id: int) -> str:
                     "INFO",
                     f"Job completed successfully in {job.duration_seconds:.2f}s",
                     source="worker",
-                    tenant_id=job.tenant_id,
                 )
 
                 logger.info(
@@ -320,12 +318,7 @@ def _mark_job_failed(
     session.commit()
 
     DBLogger.log_job(
-        session,
-        job.id,
-        "ERROR",
-        f"Job failed: {error_message}",
-        source="worker",
-        tenant_id=job.tenant_id,
+        session, job.id, "ERROR", f"Job failed: {error_message}", source="worker"
     )
 
 
@@ -341,7 +334,6 @@ def _mark_job_retrying(session, job: Job, error_message: str) -> None:
         "WARNING",
         f"Job will be retried: {error_message}",
         source="worker",
-        tenant_id=job.tenant_id,
     )
 
 

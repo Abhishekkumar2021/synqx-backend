@@ -57,8 +57,6 @@ class Pipeline(Base, AuditMixin, SoftDeleteMixin):
     )
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "name", name="uq_pipeline_name_per_tenant"),
-        Index("idx_pipeline_status_tenant", "status", "tenant_id"),
         Index("idx_pipeline_schedule", "schedule_enabled", "schedule_cron"),
         CheckConstraint("max_parallel_runs > 0", name="ck_pipeline_max_parallel"),
         CheckConstraint("priority BETWEEN 1 AND 10", name="ck_pipeline_priority"),

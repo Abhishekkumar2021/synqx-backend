@@ -29,11 +29,8 @@ class UserTrackingMixin:
     created_by: Mapped[Optional[str]] = mapped_column(String(255), index=True)
     updated_by: Mapped[Optional[str]] = mapped_column(String(255))
 
-class TenantMixin:
-    """Multi-tenancy support"""
-    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
-class AuditMixin(TimestampMixin, UserTrackingMixin, TenantMixin):
+class AuditMixin(TimestampMixin, UserTrackingMixin):
     """Complete audit trail mixin"""
     pass
 

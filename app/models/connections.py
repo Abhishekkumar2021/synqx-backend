@@ -42,12 +42,6 @@ class Connection(Base, AuditMixin, SoftDeleteMixin):
         back_populates="connection", cascade="all, delete-orphan", lazy="selectin"
     )
 
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "name", name="uq_connection_name_per_tenant"),
-        Index("idx_connection_type_tenant", "connector_type", "tenant_id"),
-        Index("idx_connection_health", "health_status", "tenant_id"),
-    )
-
     def __repr__(self):
         return f"<Connection(id={self.id}, name='{self.name}', type={self.connector_type})>"
 
@@ -91,7 +85,7 @@ class Asset(Base, AuditMixin, SoftDeleteMixin):
 
     __table_args__ = (
         UniqueConstraint("connection_id", "name", name="uq_asset_name_per_connection"),
-        Index("idx_asset_type_tenant", "asset_type", "tenant_id"),
+        Index("idx_asset_type_tenant", "asset_type"),
         Index("idx_asset_source_dest", "is_source", "is_destination"),
         CheckConstraint("is_source = TRUE OR is_destination = TRUE", name="ck_asset_direction"),
     )

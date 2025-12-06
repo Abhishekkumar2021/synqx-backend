@@ -34,9 +34,7 @@ class ConnectionService:
     def create_connection(
         self,
         connection_create: ConnectionCreate,
-        tenant_id: int
     ) -> Connection:
-        tenant_id_str = str(tenant_id)
         
         try:
             encrypted_config = VaultService.encrypt_config(connection_create.config)
@@ -50,7 +48,6 @@ class ConnectionService:
                 max_concurrent_connections=connection_create.max_concurrent_connections,
                 connection_timeout_seconds=connection_create.connection_timeout_seconds,
                 health_status="unknown",
-                tenant_id=tenant_id_str
             )
             
             self.db_session.add(connection)
@@ -71,7 +68,6 @@ class ConnectionService:
                     "connection_id": connection.id,
                     "connection_name": connection.name,
                     "connector_type": connection.connector_type.value,
-                    "tenant_id": tenant_id_str,
                     "health_status": connection.health_status
                 }
             )
@@ -91,29 +87,23 @@ class ConnectionService:
     def get_connection(
         self,
         connection_id: int,
-        tenant_id: int
     ) -> Optional[Connection]:
         return self.db_session.query(Connection).filter(
             and_(
                 Connection.id == connection_id,
-                Connection.tenant_id == str(tenant_id),
                 Connection.deleted_at.is_(None)
             )
         ).first()
 
     def list_connections(
         self,
-        tenant_id: int,
         connector_type: Optional[ConnectorType] = None,
         health_status: Optional[str] = None,
         limit: int = 100,
         offset: int = 0
     ) -> Tuple[List[Connection], int]:
         query = self.db_session.query(Connection).filter(
-            and_(
-                Connection.tenant_id == str(tenant_id),
                 Connection.deleted_at.is_(None)
-            )
         )
         
         if connector_type:
@@ -131,9 +121,8 @@ class ConnectionService:
         self,
         connection_id: int,
         connection_update: ConnectionUpdate,
-        tenant_id: int
     ) -> Connection:
-        connection = self.get_connection(connection_id, tenant_id)
+        connection = self.get_connection(connection_id)
         
         if not connection:
             raise AppError(f"Connection {connection_id} not found")
@@ -185,10 +174,9 @@ class ConnectionService:
     def delete_connection(
         self,
         connection_id: int,
-        tenant_id: int,
         hard_delete: bool = False
     ) -> bool:
-        connection = self.get_connection(connection_id, tenant_id)
+        connection = self.get_connection(connection_id)
         
         if not connection:
             raise AppError(f"Connection {connection_id} not found")
@@ -217,10 +205,9 @@ class ConnectionService:
     def test_connection(
         self,
         connection_id: int,
-        tenant_id: int,
         custom_config: Optional[Dict[str, Any]] = None
     ) -> ConnectionTestResponse:
-        connection = self.get_connection(connection_id, tenant_id)
+        connection = self.get_connection(connection_id)
         
         if not connection:
             raise AppError(f"Connection {connection_id} not found")
@@ -229,7 +216,6 @@ class ConnectionService:
             temp_connection = Connection(
                 connector_type=connection.connector_type,
                 config_encrypted=VaultService.encrypt_config(custom_config),
-                tenant_id=str(tenant_id)
             )
             result = self._test_connection_internal(temp_connection)
         else:
@@ -279,11 +265,9 @@ class ConnectionService:
     def create_asset(
         self,
         asset_create: AssetCreate,
-        tenant_id: int
     ) -> Asset:
-        tenant_id_str = str(tenant_id)
         
-        connection = self.get_connection(asset_create.connection_id, tenant_id)
+        connection = self.get_connection(asset_create.connection_id)
         if not connection:
             raise AppError(f"Connection {asset_create.connection_id} not found")
         
@@ -301,7 +285,6 @@ class ConnectionService:
                 schema_metadata=asset_create.schema_metadata,
                 row_count_estimate=asset_create.row_count_estimate,
                 size_bytes_estimate=asset_create.size_bytes_estimate,
-                tenant_id=tenant_id_str
             )
             
             self.db_session.add(asset)
@@ -332,19 +315,16 @@ class ConnectionService:
     def get_asset(
         self,
         asset_id: int,
-        tenant_id: int
     ) -> Optional[Asset]:
         return self.db_session.query(Asset).filter(
             and_(
                 Asset.id == asset_id,
-                Asset.tenant_id == str(tenant_id),
                 Asset.deleted_at.is_(None)
             )
         ).first()
 
     def list_assets(
         self,
-        tenant_id: int,
         connection_id: Optional[int] = None,
         asset_type: Optional[str] = None,
         is_source: Optional[bool] = None,
@@ -353,10 +333,7 @@ class ConnectionService:
         offset: int = 0
     ) -> Tuple[List[Asset], int]:
         query = self.db_session.query(Asset).filter(
-            and_(
-                Asset.tenant_id == str(tenant_id),
                 Asset.deleted_at.is_(None)
-            )
         )
         
         if connection_id:
@@ -380,9 +357,8 @@ class ConnectionService:
         self,
         asset_id: int,
         asset_update: AssetUpdate,
-        tenant_id: int
     ) -> Asset:
-        asset = self.get_asset(asset_id, tenant_id)
+        asset = self.get_asset(asset_id)
         
         if not asset:
             raise AppError(f"Asset {asset_id} not found")
@@ -437,10 +413,9 @@ class ConnectionService:
     def delete_asset(
         self,
         asset_id: int,
-        tenant_id: int,
         hard_delete: bool = False
     ) -> bool:
-        asset = self.get_asset(asset_id, tenant_id)
+        asset = self.get_asset(asset_id)
         
         if not asset:
             raise AppError(f"Asset {asset_id} not found")
@@ -468,12 +443,11 @@ class ConnectionService:
     def discover_assets(
         self,
         connection_id: int,
-        tenant_id: int,
         pattern: Optional[str] = None,
         asset_types: Optional[List[str]] = None,
         include_system: bool = False
     ) -> AssetDiscoverResponse:
-        connection = self.get_connection(connection_id, tenant_id)
+        connection = self.get_connection(connection_id)
         
         if not connection:
             raise AppError(f"Connection {connection_id} not found")
@@ -513,11 +487,10 @@ class ConnectionService:
     def discover_schema(
         self,
         asset_id: int,
-        tenant_id: int,
         sample_size: int = 1000,
         force_refresh: bool = False
     ) -> SchemaDiscoveryResponse:
-        asset = self.get_asset(asset_id, tenant_id)
+        asset = self.get_asset(asset_id)
         
         if not asset:
             raise AppError(f"Asset {asset_id} not found")
@@ -559,7 +532,6 @@ class ConnectionService:
                     schema_hash=schema_hash,
                     is_breaking_change=is_breaking_change,
                     discovered_at=datetime.now(timezone.utc),
-                    tenant_id=str(tenant_id)
                 )
                 
                 self.db_session.add(schema_version)

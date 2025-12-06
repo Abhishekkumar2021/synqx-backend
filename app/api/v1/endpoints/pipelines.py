@@ -18,7 +18,7 @@ from app.schemas.pipeline import (
     PipelineStatsResponse,
 )
 from app.services.pipeline_service import PipelineService
-from app.api.deps import get_db, get_current_tenant_id
+from app.api.deps import get_db
 from app.core.errors import AppError, ConfigurationError
 from app.core.logging import get_logger
 from app.models.enums import PipelineStatus
@@ -40,19 +40,18 @@ def create_pipeline(
         True, description="Validate DAG structure before creation"
     ),
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     try:
         service = PipelineService(db)
         pipeline = service.create_pipeline(
-            pipeline_create, tenant_id=tenant_id, validate_dag=validate_dag
+            pipeline_create, validate_dag=validate_dag
         )
 
         response = PipelineDetailRead.model_validate(pipeline)
 
         if pipeline.published_version_id:
             version_detail = service.get_pipeline_version(
-                pipeline.id, pipeline.published_version_id, tenant_id
+                pipeline.id, pipeline.published_version_id
             )
             if version_detail:
                 response.published_version = PipelineVersionRead.model_validate(
@@ -97,12 +96,11 @@ def list_pipelines(
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of results"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     try:
         service = PipelineService(db)
         pipelines = service.list_pipelines(
-            tenant_id=tenant_id, status=status_filter, limit=limit, offset=offset
+         status=status_filter, limit=limit, offset=offset
         )
 
         total = len(pipelines)
@@ -134,10 +132,9 @@ def list_pipelines(
 def get_pipeline(
     pipeline_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     service = PipelineService(db)
-    pipeline = service.get_pipeline(pipeline_id, tenant_id=tenant_id)
+    pipeline = service.get_pipeline(pipeline_id)
 
     if not pipeline:
         raise HTTPException(
@@ -152,7 +149,7 @@ def get_pipeline(
 
     if pipeline.published_version_id:
         version_detail = service.get_pipeline_version(
-            pipeline.id, pipeline.published_version_id, tenant_id
+            pipeline.id, pipeline.published_version_id
         )
         if version_detail:
             response.published_version = PipelineVersionRead.model_validate(
@@ -186,11 +183,10 @@ def update_pipeline(
     pipeline_id: int,
     pipeline_update: PipelineUpdate,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     try:
         service = PipelineService(db)
-        pipeline = service.update_pipeline(pipeline_id, pipeline_update, tenant_id)
+        pipeline = service.update_pipeline(pipeline_id, pipeline_update)
         return PipelineRead.model_validate(pipeline)
 
     except AppError as e:
@@ -222,11 +218,10 @@ def delete_pipeline(
     pipeline_id: int,
     hard_delete: bool = Query(False, description="Permanently delete from database"),
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     try:
         service = PipelineService(db)
-        service.delete_pipeline(pipeline_id, tenant_id, hard_delete=hard_delete)
+        service.delete_pipeline(pipeline_id, hard_delete=hard_delete)
         return None
 
     except AppError as e:
@@ -258,13 +253,12 @@ def trigger_pipeline_run(
     pipeline_id: int,
     trigger_request: PipelineTriggerRequest = Body(...),
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     try:
         service = PipelineService(db)
         result = service.trigger_pipeline_run(
             pipeline_id=pipeline_id,
-            tenant_id=tenant_id,
+        
             version_id=trigger_request.version_id,
             async_execution=trigger_request.async_execution,
             run_params=trigger_request.run_params,
@@ -307,10 +301,9 @@ def trigger_pipeline_run(
 def list_pipeline_versions(
     pipeline_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     service = PipelineService(db)
-    pipeline = service.get_pipeline(pipeline_id, tenant_id)
+    pipeline = service.get_pipeline(pipeline_id)
 
     if not pipeline:
         raise HTTPException(
@@ -348,10 +341,9 @@ def get_pipeline_version(
     pipeline_id: int,
     version_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     service = PipelineService(db)
-    version = service.get_pipeline_version(pipeline_id, version_id, tenant_id)
+    version = service.get_pipeline_version(pipeline_id, version_id)
 
     if not version:
         raise HTTPException(
@@ -376,11 +368,10 @@ def publish_pipeline_version(
     version_id: int,
     publish_request: PipelinePublishRequest = Body(...),
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     try:
         service = PipelineService(db)
-        version = service.publish_version(pipeline_id, version_id, tenant_id)
+        version = service.publish_version(pipeline_id, version_id)
 
         return PipelinePublishResponse(
             message=f"Version {version.version} published successfully",
@@ -417,11 +408,10 @@ def publish_pipeline_version(
 def validate_pipeline(
     pipeline_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     try:
         service = PipelineService(db)
-        pipeline = service.get_pipeline(pipeline_id, tenant_id)
+        pipeline = service.get_pipeline(pipeline_id)
 
         if not pipeline:
             raise HTTPException(
@@ -432,7 +422,7 @@ def validate_pipeline(
                 },
             )
 
-        version = service.get_pipeline_version(pipeline_id, None, tenant_id)
+        version = service.get_pipeline_version(pipeline_id, None)
 
         if not version:
             return PipelineValidationResponse(
@@ -481,7 +471,6 @@ def validate_pipeline(
 def get_pipeline_stats(
     pipeline_id: int,
     db: Session = Depends(get_db),
-    tenant_id: int = Depends(get_current_tenant_id),
 ):
     try:
         from sqlalchemy import func
@@ -489,7 +478,7 @@ def get_pipeline_stats(
         from app.models.enums import JobStatus
 
         service = PipelineService(db)
-        pipeline = service.get_pipeline(pipeline_id, tenant_id)
+        pipeline = service.get_pipeline(pipeline_id)
 
         if not pipeline:
             raise HTTPException(

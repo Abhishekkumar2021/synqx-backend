@@ -7,7 +7,3 @@ from app.connectors.impl.files.local import LocalFileConnector
 ConnectorFactory.register_connector("postgresql", PostgresConnector)
 ConnectorFactory.register_connector("sqlite", SQLiteConnector)
 ConnectorFactory.register_connector("local_file", LocalFileConnector)
-
-# Other connectors will be registered here as they are implemented
-# from app.connectors.impl.files.s3 import S3Connector
-# ConnectorFactory.register_connector("s3", S3Connector)

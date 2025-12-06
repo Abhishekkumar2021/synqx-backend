@@ -43,7 +43,6 @@ class PipelineNodeUpdate(BaseModel):
 class PipelineNodeRead(PipelineNodeBase):
     id: int
     pipeline_version_id: int
-    tenant_id: str
     created_at: datetime
     updated_at: datetime
 
@@ -73,7 +72,6 @@ class PipelineEdgeRead(PipelineEdgeBase):
     pipeline_version_id: int
     from_node_id: int
     to_node_id: int
-    tenant_id: str
     created_at: datetime
     updated_at: datetime
 
@@ -119,7 +117,6 @@ class PipelineVersionRead(PipelineVersionBase):
     version: int
     is_published: bool
     published_at: Optional[datetime]
-    tenant_id: str
     created_at: datetime
     updated_at: datetime
     nodes: List[PipelineNodeRead] = Field(default_factory=list)
@@ -214,7 +211,6 @@ class PipelineRead(PipelineBase):
     status: PipelineStatus
     current_version: Optional[int]
     published_version_id: Optional[int]
-    tenant_id: str
     created_at: datetime
     updated_at: datetime
     deleted_at: Optional[datetime] = None
