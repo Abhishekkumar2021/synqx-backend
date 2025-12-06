@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "SynqX ETL Agent"
     ENVIRONMENT: str = "development"
     DATABASE_URL: str
+    API_V1_STR: str = "/api/v1"
     
     # CORS
     ALLOWED_ORIGINS: List[str] = ["*"]
