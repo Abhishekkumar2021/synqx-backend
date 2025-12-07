@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 
 
 @router.post(
-    "/",
+    "",
     response_model=PipelineDetailRead,
     status_code=status.HTTP_201_CREATED,
     summary="Create Pipeline",
@@ -43,9 +43,7 @@ def create_pipeline(
 ):
     try:
         service = PipelineService(db)
-        pipeline = service.create_pipeline(
-            pipeline_create, validate_dag=validate_dag
-        )
+        pipeline = service.create_pipeline(pipeline_create, validate_dag=validate_dag)
 
         response = PipelineDetailRead.model_validate(pipeline)
 
@@ -84,10 +82,10 @@ def create_pipeline(
 
 
 @router.get(
-    "/",
+    "",
     response_model=PipelineListResponse,
     summary="List Pipelines",
-    description="List all pipelines for the current tenant with optional filtering",
+    description="List all pipelines with optional filtering",
 )
 def list_pipelines(
     status_filter: Optional[PipelineStatus] = Query(
@@ -99,11 +97,9 @@ def list_pipelines(
 ):
     try:
         service = PipelineService(db)
-        pipelines = service.list_pipelines(
-         status=status_filter, limit=limit, offset=offset
+        pipelines, total = service.list_pipelines(
+            status=status_filter, limit=limit, offset=offset
         )
-
-        total = len(pipelines)
 
         return PipelineListResponse(
             pipelines=[PipelineRead.model_validate(p) for p in pipelines],
@@ -258,7 +254,6 @@ def trigger_pipeline_run(
         service = PipelineService(db)
         result = service.trigger_pipeline_run(
             pipeline_id=pipeline_id,
-        
             version_id=trigger_request.version_id,
             async_execution=trigger_request.async_execution,
             run_params=trigger_request.run_params,
@@ -474,7 +469,7 @@ def get_pipeline_stats(
 ):
     try:
         from sqlalchemy import func
-        from app.models.execution import Job, PipelineRun
+        from app.models.execution import Job
         from app.models.enums import JobStatus
 
         service = PipelineService(db)
@@ -508,15 +503,17 @@ def get_pipeline_stats(
             or 0
         )
 
-        avg_duration = (
-            db.query(func.avg(Job.duration_seconds))
+        avg_duration_ms = (
+            db.query(func.avg(Job.execution_time_ms))
             .filter(
                 Job.pipeline_id == pipeline_id,
                 Job.status == JobStatus.SUCCESS,
-                Job.duration_seconds.isnot(None),
+                Job.execution_time_ms.isnot(None),
             )
             .scalar()
         )
+
+        avg_duration_seconds = (avg_duration_ms / 1000.0) if avg_duration_ms else None
 
         last_run = (
             db.query(Job.completed_at)
@@ -534,11 +531,13 @@ def get_pipeline_stats(
             total_runs=total_runs,
             successful_runs=successful_runs,
             failed_runs=failed_runs,
-            average_duration_seconds=float(avg_duration) if avg_duration else None,
+            average_duration_seconds=avg_duration_seconds,
             last_run_at=last_run[0] if last_run else None,
             next_scheduled_run=next_scheduled_run,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(
             f"Error getting stats for pipeline {pipeline_id}: {e}", exc_info=True

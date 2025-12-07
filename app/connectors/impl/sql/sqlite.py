@@ -1,10 +1,11 @@
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, List, Optional, Iterator, Union
 import os
 import pandas as pd
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.engine import Connection, Engine
-from pydantic import Field, FilePath
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from datetime import datetime
 
 from app.connectors.base import BaseConnector
 from app.core.errors import (
@@ -17,223 +18,206 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-class SQLiteConfig(BaseSettings):
-    """
-    Configuration model for SQLite connector.
-    """
-    model_config = SettingsConfigDict(extra='ignore', case_sensitive=False)
 
-    database_path: str = Field(..., description="Path to the SQLite database file")
+class SQLiteConfig(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
+    database_path: str = Field(...)
+
 
 class SQLiteConnector(BaseConnector):
-    """
-    A concrete implementation of BaseConnector for SQLite databases.
-    """
 
     def __init__(self, config: Dict[str, Any]):
         self._config_model: Optional[SQLiteConfig] = None
         self._engine: Optional[Engine] = None
         self._connection: Optional[Connection] = None
-        super().__init__(config) # This calls validate_config
+        super().__init__(config)
 
     def validate_config(self) -> None:
-        """
-        Validates the configuration using Pydantic.
-        """
         try:
             self._config_model = SQLiteConfig.model_validate(self.config)
-            # Ensure parent directory exists for the database file
             db_dir = os.path.dirname(self._config_model.database_path)
             if db_dir and not os.path.exists(db_dir):
                 os.makedirs(db_dir, exist_ok=True)
         except Exception as e:
-            raise ConfigurationError(f"Invalid SQLite configuration: {e}") from e
+            raise ConfigurationError(f"Invalid SQLite configuration: {e}")
 
-    def _get_sqlalchemy_url(self) -> str:
-        """Constructs the SQLAlchemy connection URL."""
-        if not self._config_model:
-            raise ConfigurationError("Configuration not validated.")
-        
-        # SQLite URL format: sqlite:///path/to/database.db
+    def _url(self) -> str:
         return f"sqlite:///{self._config_model.database_path}"
 
     def connect(self) -> None:
-        """
-        Establishes a connection to the SQLite database.
-        """
         if self._connection and not self._connection.closed:
-            logger.debug("SQLite connection already open.")
             return
-
         try:
-            self._engine = create_engine(self._get_sqlalchemy_url())
+            self._engine = create_engine(self._url())
             self._connection = self._engine.connect()
-            logger.info("Successfully connected to SQLite.")
         except Exception as e:
-            logger.error(f"Failed to connect to SQLite: {e}")
-            raise ConnectionFailedError(f"SQLite connection failed: {e}") from e
+            raise ConnectionFailedError(f"SQLite connection failed: {e}")
 
     def disconnect(self) -> None:
-        """
-        Closes the SQLite database connection and disposes the engine.
-        """
         if self._connection:
             try:
                 self._connection.close()
-                logger.info("SQLite connection closed.")
-            except Exception as e:
-                logger.warning(f"Error closing SQLite connection: {e}")
             finally:
                 self._connection = None
-        
         if self._engine:
             try:
                 self._engine.dispose()
-                logger.info("SQLite engine disposed.")
-            except Exception as e:
-                logger.warning(f"Error disposing SQLite engine: {e}")
             finally:
                 self._engine = None
 
-
     def test_connection(self) -> bool:
-        """
-        Tests if the SQLite connection can be established.
-        """
         try:
-            with self.session(): # Use the context manager for testing
+            with self.session():
                 self._connection.execute(text("SELECT 1"))
                 return True
-        except (ConnectionFailedError) as e:
-            logger.error(f"SQLite connection test failed: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"An unexpected error occurred during SQLite connection test: {e}")
+        except Exception:
             return False
 
-    def list_assets(self) -> List[str]:
-        """
-        Lists all tables in the SQLite database.
-        """
-        if not self._connection:
-            self.connect()
+    def discover_assets(
+        self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
+    ) -> List[Dict[str, Any]]:
+
+        self.connect()
+        inspector = inspect(self._engine)
+        tables = inspector.get_table_names()
+
+        if pattern:
+            tables = [t for t in tables if pattern.lower() in t.lower()]
+
+        if not include_metadata:
+            return [{"name": t} for t in tables]
+
+        results = []
+        for tbl in tables:
+            row_count = self._get_row_count(tbl)
+            db_path = self._config_model.database_path
+            stat = os.stat(db_path)
+
+            results.append(
+                {
+                    "name": tbl,
+                    "type": "table",
+                    "row_count": row_count,
+                    "size_bytes": stat.st_size,
+                    "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                }
+            )
+
+        return results
+
+    def _get_row_count(self, table: str) -> Optional[int]:
+        try:
+            q = text(f'SELECT COUNT(*) FROM "{table}"')
+            result = self._connection.execute(q).scalar()
+            return int(result)
+        except Exception:
+            return None
+
+    def infer_schema(
+        self, asset: str, sample_size: int = 1000, mode: str = "auto", **kwargs
+    ) -> Dict[str, Any]:
+
+        self.connect()
+
+        if mode == "metadata":
+            return self._schema_metadata(asset)
+        if mode == "sample":
+            return self._schema_sample(asset, sample_size)
 
         try:
-            inspector = inspect(self._engine)
-            tables = inspector.get_table_names()
-            logger.debug(f"Found tables in SQLite: {tables}")
-            return tables
-        except Exception as e:
-            raise SchemaDiscoveryError(f"Failed to list assets in SQLite: {e}") from e
+            return self._schema_metadata(asset)
+        except Exception:
+            return self._schema_sample(asset, sample_size)
 
-    def get_schema(self, asset: str) -> Dict[str, Any]:
-        """
-        Retrieves the schema for a given table (asset) in SQLite.
-        """
-        if not self._connection:
-            self.connect()
-
+    def _schema_metadata(self, asset: str) -> Dict[str, Any]:
+        inspector = inspect(self._engine)
         try:
-            inspector = inspect(self._engine)
-            columns = inspector.get_columns(asset) # SQLite doesn't use schema for get_columns
-            
-            schema_dict = {
-                "asset_name": asset,
+            cols = inspector.get_columns(asset)
+            return {
+                "asset": asset,
                 "columns": [
                     {
-                        "name": col["name"],
-                        "type": str(col["type"]),
-                        "nullable": col["nullable"],
-                        "default": col.get("default"),
-                        "primary_key": col.get("primary_key", False)
-                    } for col in columns
-                ]
+                        "name": c["name"],
+                        "type": str(c["type"]),
+                        "nullable": c.get("nullable"),
+                        "default": c.get("default"),
+                        "primary_key": c.get("primary_key", False),
+                    }
+                    for c in cols
+                ],
             }
-            logger.debug(f"Retrieved schema for '{asset}': {schema_dict}")
-            return schema_dict
         except Exception as e:
-            raise SchemaDiscoveryError(f"Failed to get schema for asset '{asset}': {e}") from e
+            raise SchemaDiscoveryError(f"Metadata schema failed: {e}")
+
+    def _schema_sample(self, asset: str, sample_size: int) -> Dict[str, Any]:
+        try:
+            df = next(self.read_batch(asset, limit=sample_size))
+            return {
+                "asset": asset,
+                "columns": [
+                    {"name": col, "type": str(dtype)}
+                    for col, dtype in df.dtypes.items()
+                ],
+            }
+        except Exception as e:
+            raise SchemaDiscoveryError(f"Sample-based schema failed: {e}")
 
     def read_batch(
-        self, 
-        asset: str, 
-        limit: Optional[int] = None, 
+        self,
+        asset: str,
+        limit: Optional[int] = None,
         offset: Optional[int] = None,
-        **kwargs
+        **kwargs,
     ) -> Iterator[pd.DataFrame]:
-        """
-        Reads data from a SQLite table in batches.
-        """
-        if not self._connection:
-            self.connect()
+
+        self.connect()
+
+        query = f'SELECT * FROM "{asset}"'
+        if limit is not None:
+            query += f" LIMIT {limit}"
+        if offset is not None:
+            query += f" OFFSET {offset}"
+
+        chunksize = kwargs.pop("chunksize", 10000)
 
         try:
-            query = f'SELECT * FROM "{asset}"'
-            
-            if limit is not None:
-                query += f" LIMIT {limit}"
-            if offset is not None:
-                query += f" OFFSET {offset}"
-            
-            logger.info(f"Executing query: {query}")
-
-            chunksize = kwargs.pop("chunksize", 10000)
-            
-            iterator = pd.read_sql_query(
-                sql=text(query), 
-                con=self._connection, 
-                chunksize=chunksize, 
-                coerce_float=True, 
-                **kwargs
+            it = pd.read_sql_query(
+                text(query), con=self._connection, chunksize=chunksize, **kwargs
             )
-            
-            for chunk in iterator:
-                logger.info(f"Read chunk with {len(chunk)} rows")
+            for chunk in it:
                 yield chunk
-
         except Exception as e:
-            raise DataTransferError(f"Failed to read data from '{asset}': {e}") from e
+            raise DataTransferError(f"Failed to read from '{asset}': {e}")
 
     def write_batch(
-        self, 
-        data: Union[pd.DataFrame, Iterator[pd.DataFrame]], 
-        asset: str, 
+        self,
+        data: Union[pd.DataFrame, Iterator[pd.DataFrame]],
+        asset: str,
         mode: str = "append",
-        **kwargs
+        **kwargs,
     ) -> int:
-        """
-        Writes data to a SQLite table.
-        """
-        if not self._connection:
-            self.connect()
 
-        total_rows_written = 0
-        
+        self.connect()
+
         if isinstance(data, pd.DataFrame):
-            data_iterator = [data]
+            data_iter = [data]
         else:
-            data_iterator = data
+            data_iter = data
+
+        total = 0
 
         try:
-            for df_chunk in data_iterator:
-                if df_chunk.empty:
+            for df in data_iter:
+                if df.empty:
                     continue
-
-                df_chunk.to_sql(
+                df.to_sql(
                     name=asset,
                     con=self._connection,
-                    if_exists=mode, # 'append', 'replace', 'fail'
+                    if_exists=mode,
                     index=False,
-                    **kwargs
+                    **kwargs,
                 )
-                total_rows_written += len(df_chunk)
-            
-            if mode == "replace":
-                logger.info(f"Table '{asset}' replaced and {total_rows_written} rows written.")
-            elif mode == "append":
-                logger.info(f"{total_rows_written} rows appended to '{asset}'.")
-            
-            return total_rows_written
-
+                total += len(df)
+            return total
         except Exception as e:
-            raise DataTransferError(f"Failed to write data to '{asset}' in mode '{mode}': {e}") from e
+            raise DataTransferError(f"Failed to write to '{asset}': {e}")

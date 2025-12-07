@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterator, List, Optional, Union, Generator
+from typing import Any, Dict, Optional, List, Iterator, Union, Generator
 from contextlib import contextmanager
 import pandas as pd
 
@@ -12,120 +12,78 @@ class BaseConnector(ABC):
     """
 
     def __init__(self, config: Dict[str, Any]):
-        """
-        Initialize the connector with configuration settings.
-        
-        Args:
-            config: Dictionary containing connection parameters (host, port, credentials, etc.)
-        """
         self.config = config
         self.validate_config()
 
     @abstractmethod
-    def validate_config(self, **kwargs) -> None:
-        """
-        Validate the configuration dictionary.
-        Should raise ConfigurationError if invalid.
-        """
+    def validate_config(self) -> None:
         pass
 
     @abstractmethod
-    def connect(self, **kwargs) -> None:
-        """
-        Establish the connection to the external system.
-        Should raise ConnectionFailedError or AuthenticationError on failure.
-        """
+    def connect(self) -> None:
         pass
 
     @abstractmethod
-    def disconnect(self, **kwargs) -> None:
-        """
-        Close the connection and release resources.
-        """
+    def disconnect(self) -> None:
         pass
 
     @abstractmethod
-    def test_connection(self, **kwargs) -> bool:
-        """
-        Test if the connection can be established successfully.
-        Returns True if successful, raises an exception or returns False otherwise.
-        """
+    def test_connection(self) -> bool:
         pass
 
     @contextmanager
     def session(self) -> Generator["BaseConnector", None, None]:
-        """
-        Context manager to ensure safe connection handling.
-        
-        Usage:
-            with connector.session() as conn:
-                conn.read(...)
-        """
+        self.connect()
         try:
-            self.connect()
             yield self
         finally:
             self.disconnect()
 
-
     @abstractmethod
-    def list_assets(self, **kwargs) -> List[str]:
-        """
-        List available assets (tables, buckets, files) in the source.
-        """
+    def discover_assets(
+        self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
+    ) -> List[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    def get_schema(self, asset: str) -> Dict[str, Any]:
-        """
-        Get the schema definition for a specific asset.
-        """
+    def infer_schema(
+        self,
+        asset: str,
+        sample_size: int = 1000,
+        mode: str = "auto",  # "metadata", "sample", or "auto"
+        **kwargs,
+    ) -> Dict[str, Any]:
         pass
-
-    # -------------------------------------------------------------------------
-    # Data IO
-    # -------------------------------------------------------------------------
-
+    
     @abstractmethod
     def read_batch(
-        self, 
-        asset: str, 
-        limit: Optional[int] = None, 
+        self,
+        asset: str,
+        limit: Optional[int] = None,
         offset: Optional[int] = None,
-        **kwargs
+        **kwargs,
     ) -> Iterator[pd.DataFrame]:
-        """
-        Read data from the source in batches.
-        
-        Args:
-            asset: The table name, file path, or resource identifier.
-            limit: Max number of records to read (optional).
-            offset: Number of records to skip (optional).
-            **kwargs: Additional read options (filters, columns, etc.).
-            
-        Yields:
-            pandas.DataFrame: Chunks of data.
-        """
         pass
 
     @abstractmethod
     def write_batch(
-        self, 
-        data: Union[pd.DataFrame, Iterator[pd.DataFrame]], 
-        asset: str, 
+        self,
+        data: Union[pd.DataFrame, Iterator[pd.DataFrame]],
+        asset: str,
         mode: str = "append",
-        **kwargs
+        **kwargs,
     ) -> int:
-        """
-        Write data to the destination.
-
-        Args:
-            data: A single DataFrame or an iterator of DataFrames.
-            asset: The target table name or file path.
-            mode: Write mode ('append', 'replace', 'upsert').
-            **kwargs: Additional write options.
-
-        Returns:
-            int: Total number of records written.
-        """
         pass
+
+    @staticmethod
+    def slice_dataframe(df: pd.DataFrame, offset: Optional[int], limit: Optional[int]):
+        if offset:
+            df = df.iloc[offset:]
+        if limit:
+            df = df.iloc[:limit]
+        return df
+
+    @staticmethod
+    def chunk_dataframe(df: pd.DataFrame, chunksize: int):
+        for i in range(0, len(df), chunksize):
+            yield df.iloc[i : i + chunksize]

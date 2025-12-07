@@ -1,9 +1,7 @@
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, List, Optional, Iterator, Union
 import pandas as pd
 from sqlalchemy import create_engine, text, inspect
-from sqlalchemy.engine import Connection, Engine
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import Engine, Connection
 
 from app.connectors.base import BaseConnector
 from app.core.errors import (
@@ -14,8 +12,11 @@ from app.core.errors import (
     DataTransferError,
 )
 from app.core.logging import get_logger
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = get_logger(__name__)
+
 
 class PostgresConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
@@ -40,11 +41,9 @@ class PostgresConnector(BaseConnector):
         try:
             self._config_model = PostgresConfig.model_validate(self.config)
         except Exception as e:
-            raise ConfigurationError(f"Invalid PostgreSQL configuration: {e}") from e
+            raise ConfigurationError(f"Invalid PostgreSQL configuration: {e}")
 
-    def _build_sqlalchemy_url(self) -> str:
-        if not self._config_model:
-            raise ConfigurationError("Configuration not validated.")
+    def _sqlalchemy_url(self) -> str:
         return (
             f"postgresql+psycopg2://"
             f"{self._config_model.username}:{self._config_model.password}"
@@ -57,27 +56,23 @@ class PostgresConnector(BaseConnector):
             return
         try:
             if not self._engine:
-                self._engine = create_engine(self._build_sqlalchemy_url(), future=True)
+                self._engine = create_engine(self._sqlalchemy_url(), future=True)
             self._connection = self._engine.connect()
-            logger.info("postgresql_connected")
+            logger.info("postgres_connected")
         except Exception as e:
-            if "authentication" in str(e).lower() or "password" in str(e).lower():
-                raise AuthenticationError(f"Authentication failed: {e}") from e
-            raise ConnectionFailedError(f"Connection failed: {e}") from e
+            if "authentication" in str(e).lower():
+                raise AuthenticationError(f"Authentication failed: {e}")
+            raise ConnectionFailedError(f"Connection failed: {e}")
 
     def disconnect(self) -> None:
-        if self._connection:
-            try:
+        try:
+            if self._connection:
                 self._connection.close()
-                logger.info("postgresql_disconnected")
-            finally:
-                self._connection = None
-        if self._engine:
-            try:
+            if self._engine:
                 self._engine.dispose()
-                logger.info("postgresql_engine_disposed")
-            finally:
-                self._engine = None
+        finally:
+            self._connection = None
+            self._engine = None
 
     def test_connection(self) -> bool:
         try:
@@ -86,21 +81,68 @@ class PostgresConnector(BaseConnector):
         except Exception:
             return False
 
-    def list_assets(self) -> List[str]:
-        if not self._connection:
-            self.connect()
-        try:
-            inspector = inspect(self._engine)
-            return inspector.get_table_names(schema=self._config_model.db_schema)
-        except Exception as e:
-            raise SchemaDiscoveryError(f"Failed to list tables: {e}") from e
+    def discover_assets(
+        self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
+    ) -> List[Dict[str, Any]]:
 
-    def get_schema(self, asset: str) -> Dict[str, Any]:
-        if not self._connection:
-            self.connect()
+        self.connect()
+        inspector = inspect(self._engine)
+
+        tables = inspector.get_table_names(schema=self._config_model.db_schema)
+
+        if pattern:
+            tables = [t for t in tables if pattern.lower() in t.lower()]
+
+        if not include_metadata:
+            return [{"name": t} for t in tables]
+
+        enriched = []
+        for tbl in tables:
+            metadata = {
+                "name": tbl,
+                "type": "table",
+                "schema": self._config_model.db_schema,
+                "row_count": self._get_row_count(tbl),
+                "size_bytes": None,
+                "last_modified": None,
+            }
+
+            enriched.append(metadata)
+
+        return enriched
+
+    def _get_row_count(self, table: str) -> Optional[int]:
+        try:
+            query = text(
+                f'SELECT COUNT(*) AS cnt FROM "{self._config_model.db_schema}"."{table}"'
+            )
+            result = self._connection.execute(query).scalar()
+            return int(result)
+        except Exception:
+            return None  
+
+    def infer_schema(
+        self, asset: str, sample_size: int = 1000, mode: str = "auto", **kwargs
+    ) -> Dict[str, Any]:
+
+        self.connect()
+
+        if mode == "metadata":
+            return self._schema_from_metadata(asset)
+
+        if mode == "sample":
+            return self._schema_from_sample(asset, sample_size)
+
+        try:
+            return self._schema_from_metadata(asset)
+        except Exception:
+            return self._schema_from_sample(asset, sample_size)
+
+    def _schema_from_metadata(self, asset: str) -> Dict[str, Any]:
         try:
             inspector = inspect(self._engine)
             columns = inspector.get_columns(asset, schema=self._config_model.db_schema)
+
             return {
                 "asset": asset,
                 "schema": self._config_model.db_schema,
@@ -108,15 +150,32 @@ class PostgresConnector(BaseConnector):
                     {
                         "name": col["name"],
                         "type": str(col["type"]),
-                        "nullable": col["nullable"],
+                        "nullable": col.get("nullable"),
                         "default": col.get("default"),
                         "primary_key": col.get("primary_key", False),
                     }
                     for col in columns
                 ],
             }
+
         except Exception as e:
-            raise SchemaDiscoveryError(f"Failed to read schema for {asset}: {e}") from e
+            raise SchemaDiscoveryError(f"Schema metadata failed: {e}")
+
+    # Infer schema from sample data
+    def _schema_from_sample(self, asset: str, sample_size: int) -> Dict[str, Any]:
+        try:
+            sample_df = next(self.read_batch(asset=asset, limit=sample_size, offset=0))
+            return {
+                "asset": asset,
+                "schema": self._config_model.db_schema,
+                "columns": [
+                    {"name": col, "type": str(dtype)}
+                    for col, dtype in sample_df.dtypes.items()
+                ],
+            }
+        except Exception as e:
+            raise SchemaDiscoveryError(f"Sample-based schema inference failed: {e}")
+
 
     def read_batch(
         self,
@@ -126,8 +185,7 @@ class PostgresConnector(BaseConnector):
         **kwargs,
     ) -> Iterator[pd.DataFrame]:
 
-        if not self._connection:
-            self.connect()
+        self.connect()
 
         query = f'SELECT * FROM "{self._config_model.db_schema}"."{asset}"'
         if limit is not None:
@@ -144,7 +202,8 @@ class PostgresConnector(BaseConnector):
             for chunk in iterator:
                 yield chunk
         except Exception as e:
-            raise DataTransferError(f"Failed to read from {asset}: {e}") from e
+            raise DataTransferError(f"Failed to read from {asset}: {e}")
+
 
     def write_batch(
         self,
@@ -154,14 +213,15 @@ class PostgresConnector(BaseConnector):
         **kwargs,
     ) -> int:
 
-        if not self._connection:
-            self.connect()
+        self.connect()
 
-        total = 0
-        data_iter = [data] if isinstance(data, pd.DataFrame) else data
+        if isinstance(data, pd.DataFrame):
+            data = [data]
+
+        total_written = 0
 
         try:
-            for df in data_iter:
+            for df in data:
                 df.to_sql(
                     name=asset,
                     schema=self._config_model.db_schema,
@@ -170,8 +230,10 @@ class PostgresConnector(BaseConnector):
                     index=False,
                     **kwargs,
                 )
-                total += len(df)
-            logger.info(f"{total} rows written to {self._config_model.db_schema}.{asset}")
-            return total
+                total_written += len(df)
+
+            logger.info(f"{total_written} rows written to {asset}")
+            return total_written
+
         except Exception as e:
-            raise DataTransferError(f"Write failed: {e}") from e
+            raise DataTransferError(f"Write failed: {e}")

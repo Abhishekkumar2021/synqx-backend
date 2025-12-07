@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
@@ -238,16 +238,18 @@ class PipelineService:
         status: Optional[PipelineStatus] = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[Pipeline]:
-        """List pipelines for a tenant with optional filtering."""
+    ) -> Tuple[List[Pipeline], int]:
+        """List pipelines with proper total count."""
         query = self.db_session.query(Pipeline).filter(Pipeline.deleted_at.is_(None))
-
+        
         if status:
             query = query.filter(Pipeline.status == status)
+        
+        total = query.count()
+        items = query.order_by(Pipeline.created_at.desc()).limit(limit).offset(offset).all()
+        
+        return items, total
 
-        return (
-            query.order_by(Pipeline.created_at.desc()).limit(limit).offset(offset).all()
-        )
 
     def get_pipeline_version(
         self, pipeline_id: int, version_id: Optional[int] = None
@@ -280,23 +282,11 @@ class PipelineService:
         async_execution: bool = True,
         run_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        Triggers a run for a specified pipeline version.
-
-        Args:
-            pipeline_id: ID of the pipeline to run
-            version_id: Specific version to run (defaults to published version)
-            async_execution: If True, enqueue task; if False, run synchronously
-            run_params: Optional runtime parameters
-
-        Returns:
-            Dictionary with job information
-        """
+        """Fixed trigger with proper field names."""
         pipeline = self.get_pipeline(pipeline_id)
         if not pipeline:
             raise AppError(f"Pipeline {pipeline_id} not found")
-
-        # Check for active parallel runs limit
+        
         if pipeline.max_parallel_runs:
             active_jobs_count = (
                 self.db_session.query(Job)
@@ -308,46 +298,43 @@ class PipelineService:
                 )
                 .count()
             )
-
+            
             if active_jobs_count >= pipeline.max_parallel_runs:
                 raise AppError(
                     f"Pipeline has reached max parallel runs limit ({pipeline.max_parallel_runs}). "
                     f"Currently {active_jobs_count} jobs running."
                 )
-
+        
         pipeline_version = self.get_pipeline_version(pipeline_id, version_id)
         if not pipeline_version:
             raise AppError(
                 f"Pipeline version not found for pipeline {pipeline_id}, version {version_id}"
             )
-
-        # Create Job record
+        
         job = Job(
             pipeline_id=pipeline_id,
             pipeline_version_id=pipeline_version.id,
             correlation_id=str(uuid.uuid4()),
             status=JobStatus.PENDING,
-            config_override=run_params,
         )
         self.db_session.add(job)
         self.db_session.flush()
-
+        
         try:
             if async_execution:
-                # Enqueue task for async execution
                 task = execute_pipeline_task.delay(job.id)
                 job.celery_task_id = task.id
                 self.db_session.commit()
-
+                
                 logger.info(
-                    f"Pipeline run enqueued",
+                    "Pipeline run enqueued",
                     extra={
                         "pipeline_id": pipeline_id,
                         "job_id": job.id,
                         "task_id": task.id,
                     },
                 )
-
+                
                 return {
                     "status": "enqueued",
                     "message": "Pipeline run enqueued for execution",
@@ -355,53 +342,53 @@ class PipelineService:
                     "task_id": task.id,
                 }
             else:
-                # Synchronous execution
                 job.status = JobStatus.RUNNING
                 job.started_at = datetime.now(timezone.utc)
                 self.db_session.commit()
-
+                
                 self.pipeline_runner.run(
                     pipeline_version, db_session=self.db_session, job_id=job.id
                 )
-
+                
                 job.status = JobStatus.SUCCESS
                 job.completed_at = datetime.now(timezone.utc)
                 if job.started_at:
-                    job.duration_seconds = (
-                        job.completed_at - job.started_at
-                    ).total_seconds()
+                    duration_ms = int((job.completed_at - job.started_at).total_seconds() * 1000)
+                    job.execution_time_ms = duration_ms
                 self.db_session.commit()
-
+                
                 logger.info(
-                    f"Pipeline run completed synchronously",
+                    "Pipeline run completed synchronously",
                     extra={"pipeline_id": pipeline_id, "job_id": job.id},
                 )
-
+                
                 return {
                     "status": "success",
                     "message": "Pipeline run completed successfully",
                     "job_id": job.id,
                 }
-
+        
         except Exception as e:
             logger.error(
-                f"Failed to trigger pipeline run",
+                "Failed to trigger pipeline run",
                 extra={"pipeline_id": pipeline_id, "job_id": job.id, "error": str(e)},
                 exc_info=True,
             )
-
+            
             self.db_session.rollback()
-
-            # Update job status
+            
             failed_job = self.db_session.query(Job).filter(Job.id == job.id).first()
             if failed_job:
                 failed_job.status = JobStatus.FAILED
                 failed_job.completed_at = datetime.now(timezone.utc)
                 failed_job.infra_error = str(e)
+                if failed_job.started_at:
+                    duration_ms = int((failed_job.completed_at - failed_job.started_at).total_seconds() * 1000)
+                    failed_job.execution_time_ms = duration_ms
                 self.db_session.commit()
-
+            
             raise AppError(f"Failed to trigger pipeline run: {e}") from e
-
+        
     def delete_pipeline(self, pipeline_id: int, hard_delete: bool = False) -> bool:
         """
         Delete a pipeline (soft delete by default).
@@ -562,3 +549,9 @@ class PipelineService:
                 "Ensure nodes are created before edges referencing them."
             )
         return node.id
+
+    def get_pipeline_next_run(self, pipeline_id: int) -> Optional[datetime]:
+        """Get next scheduled run time for a pipeline."""
+        from app.engine.scheduler import Scheduler
+        scheduler = Scheduler(self.db_session)
+        return scheduler.get_pipeline_next_run(pipeline_id)

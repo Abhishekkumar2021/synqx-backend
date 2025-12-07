@@ -12,7 +12,6 @@ from app.models.enums import ConnectorType
 
 if TYPE_CHECKING:
     from app.models.pipelines import Pipeline  # Avoid circular import
-    # --- ADDED THIS IMPORT ---
     from app.models.execution import Watermark
 
 class Connection(Base, AuditMixin, SoftDeleteMixin):
@@ -85,7 +84,6 @@ class Asset(Base, AuditMixin, SoftDeleteMixin):
 
     __table_args__ = (
         UniqueConstraint("connection_id", "name", name="uq_asset_name_per_connection"),
-        Index("idx_asset_type_tenant", "asset_type"),
         Index("idx_asset_source_dest", "is_source", "is_destination"),
         CheckConstraint("is_source = TRUE OR is_destination = TRUE", name="ck_asset_direction"),
     )

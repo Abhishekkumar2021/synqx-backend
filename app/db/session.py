@@ -8,7 +8,7 @@ from app.core.config import settings
 engine = create_engine(
     settings.DATABASE_URL, 
     pool_pre_ping=True,
-    echo=False
+    echo=settings.LOG_LEVEL == "DEBUG"
 )
 
 # Create a configured "Session" class

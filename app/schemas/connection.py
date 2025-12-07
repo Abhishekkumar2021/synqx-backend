@@ -171,11 +171,10 @@ class AssetListResponse(BaseModel):
 
 
 class AssetDiscoverRequest(BaseModel):
+    include_metadata: bool = Field(False, description="Include system assets")
     pattern: Optional[str] = Field(
         None, description="Pattern to filter assets (e.g., 'public.*')"
     )
-    asset_types: Optional[List[str]] = Field(None, description="Filter by asset types")
-    include_system: bool = Field(False, description="Include system assets")
 
 
 class AssetDiscoverResponse(BaseModel):
