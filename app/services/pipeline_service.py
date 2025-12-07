@@ -65,7 +65,7 @@ class PipelineService:
                 schedule_timezone=pipeline_create.schedule_timezone,
                 max_parallel_runs=pipeline_create.max_parallel_runs or 1,
                 execution_timeout_seconds=pipeline_create.execution_timeout_seconds,
-                tags=pipeline_create.tags or [],
+                tags=pipeline_create.tags,
                 priority=pipeline_create.priority or 0,
                 status=PipelineStatus.DRAFT,  # Start as draft
             )
@@ -259,7 +259,7 @@ class PipelineService:
         """
         query = (
             self.db_session.query(PipelineVersion)
-            .join(Pipeline)
+            .join(Pipeline, PipelineVersion.pipeline_id == Pipeline.id)
             .filter(
                 and_(
                     Pipeline.id == pipeline_id,

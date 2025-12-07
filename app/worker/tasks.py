@@ -70,12 +70,27 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 session.commit()
 
             # Check if job is already completed or running
-            if job.status in [JobStatus.SUCCESS, JobStatus.RUNNING]:
+            if job.status == JobStatus.SUCCESS:
                 logger.warning(
-                    f"Job {job_id} already in status {job.status.value}",
+                    f"Job {job_id} already COMPLETED",
                     extra={"job_id": job_id, "status": job.status.value},
                 )
                 return f"Job {job_id} already {job.status.value}"
+
+            if job.status == JobStatus.RUNNING:
+                if self.request.retries > 0:
+                    logger.warning(
+                        f"Job {job_id} found in RUNNING state during retry. Assuming crash recovery.",
+                        extra={"job_id": job_id, "retries": self.request.retries},
+                    )
+                    # Reset status to allow execution to proceed
+                    # We don't return here; we let it fall through to "Mark job as running" update below
+                else:
+                    logger.warning(
+                        f"Job {job_id} already RUNNING (no retry)",
+                        extra={"job_id": job_id},
+                    )
+                    return f"Job {job_id} already {job.status.value}"
 
             # Mark job as running
             job.status = JobStatus.RUNNING
@@ -354,9 +369,9 @@ def _should_retry_job(job: Job, error: Exception, retry_count: int) -> bool:
         return False
 
     # Check job-specific retry strategy if available
-    if hasattr(job, "retry_strategy") and job.retry_strategy:
-        max_retries = job.retry_strategy.get("max_retries", 3)
-        if retry_count >= max_retries:
+    # max_retries is a direct attribute on Job model
+    if hasattr(job, "max_retries"):
+        if retry_count >= job.max_retries:
             return False
 
     return True

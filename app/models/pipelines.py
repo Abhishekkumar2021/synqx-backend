@@ -99,6 +99,14 @@ class PipelineVersion(Base, AuditMixin):
         Index("idx_version_published", "pipeline_id", "is_published"),
     )
 
+    @property
+    def node_count(self) -> int:
+        return len(self.nodes) if self.nodes else 0
+
+    @property
+    def edge_count(self) -> int:
+        return len(self.edges) if self.edges else 0
+
     def __repr__(self):
         return f"<PipelineVersion(pipeline_id={self.pipeline_id}, version={self.version})>"
 

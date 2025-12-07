@@ -204,9 +204,11 @@ class PipelineRunner:
                 transformed = None  # Data consumed by destination
             else:
                 # Count records for pass-through nodes
+                iterator_to_count = transformed
+
                 def counting_iter():
                     nonlocal records_out
-                    for chunk in transformed:
+                    for chunk in iterator_to_count:
                         records_out += len(chunk)
                         yield chunk
 
@@ -269,29 +271,45 @@ class PipelineRunner:
 
         from sqlalchemy import func
 
-        max_run = (
-            db.query(func.max(PipelineRun.run_number))
-            .filter(PipelineRun.pipeline_id == pipeline_version.pipeline_id)
-            .scalar()
+        # Check for existing run for this job (retry case)
+        pipeline_run = (
+            db.query(PipelineRun)
+            .filter(PipelineRun.job_id == job_id)
+            .first()
         )
-        next_run = (max_run or 0) + 1
 
-        pipeline_run = PipelineRun(
-            job_id=job_id,
-            pipeline_id=pipeline_version.pipeline_id,
-            pipeline_version_id=pipeline_version.id,
-            run_number=next_run,
-            status=PipelineRunStatus.RUNNING,
-            started_at=datetime.now(timezone.utc),
-        )
-        db.add(pipeline_run)
+        if pipeline_run:
+            logger.info(f"Resuming/Retrying existing PipelineRun {pipeline_run.id} for Job {job_id}")
+            pipeline_run.status = PipelineRunStatus.RUNNING
+            pipeline_run.started_at = datetime.now(timezone.utc)
+            pipeline_run.completed_at = None
+            pipeline_run.error_message = None
+            # run_number stays the same or we could increment if we tracked retries explicitly here
+        else:
+            max_run = (
+                db.query(func.max(PipelineRun.run_number))
+                .filter(PipelineRun.pipeline_id == pipeline_version.pipeline_id)
+                .scalar()
+            )
+            next_run = (max_run or 0) + 1
+
+            pipeline_run = PipelineRun(
+                job_id=job_id,
+                pipeline_id=pipeline_version.pipeline_id,
+                pipeline_version_id=pipeline_version.id,
+                run_number=next_run,
+                status=PipelineRunStatus.RUNNING,
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(pipeline_run)
+        
         db.flush()
 
         DBLogger.log_job(
             db,
             job_id,
             "INFO",
-            f"PipelineRun {next_run} started.",
+            f"PipelineRun {pipeline_run.run_number} started.",
             metadata={"pipeline_run_id": pipeline_run.id},
             source="runner",
         )

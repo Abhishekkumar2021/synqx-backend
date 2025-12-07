@@ -1,0 +1,40 @@
+ 
+ -------------- celery@Abhisheks-MacBook-Air.local v5.6.0 (recovery)
+--- ***** ----- 
+-- ******* ---- macOS-26.1-arm64-arm-64bit-Mach-O 2025-12-07 12:52:31
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         synqx_worker:0x10b39e660
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 8 (solo)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . app.worker.tasks.cleanup_old_jobs
+  . app.worker.tasks.execute_pipeline_task
+  . app.worker.tasks.scheduler_heartbeat
+  . app.worker.tasks.test_celery
+
+[2025-12-07 12:52:31,798: INFO/MainProcess] Connected to redis://localhost:6379/0
+[2025-12-07 12:52:31,799: INFO/MainProcess] mingle: searching for neighbors
+[2025-12-07 12:52:32,804: INFO/MainProcess] mingle: all alone
+[2025-12-07 12:52:32,811: INFO/MainProcess] celery@Abhisheks-MacBook-Air.local ready.
+[2025-12-07 12:52:41,190: INFO/MainProcess] Task app.worker.tasks.execute_pipeline_task[ef21a0c4-f7b2-4d5c-8b23-f31d1991bc4d] received
+[2025-12-07 12:52:41,191: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] Pipeline execution task started extra={'job_id': 26, 'task_id': 'ef21a0c4-f7b2-4d5c-8b23-f31d1991bc4d', 'retries': 0}
+[2025-12-07 12:52:41,270: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] Starting pipeline execution    extra={'job_id': 26, 'pipeline_version_id': 34, 'node_count': 2}
+[2025-12-07 12:52:41,270: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] Pipeline execution started     job_id=26 pipeline_version=34
+[2025-12-07 12:52:41,278: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] Executing node                 node=extract_node operator=extract
+[2025-12-07 12:52:41,288: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] Node completed                 node=extract_node records_in=0 records_out=0
+[2025-12-07 12:52:41,289: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] Executing node                 node=load_node operator=load
+[2025-12-07 12:52:41,319: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] postgres_connected
+[2025-12-07 12:52:41,341: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] Node completed                 node=load_node records_in=41 records_out=41
+[2025-12-07 12:52:41,344: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] Pipeline completed             pipeline_version=34
+[2025-12-07 12:52:41,347: WARNING/MainProcess] 2025-12-07 12:52:41 [info     ] Pipeline execution completed   extra={'job_id': 26, 'duration_seconds': 0.082418}
+[2025-12-07 12:52:41,348: INFO/MainProcess] Task app.worker.tasks.execute_pipeline_task[ef21a0c4-f7b2-4d5c-8b23-f31d1991bc4d] succeeded in 0.15782316599506885s: 'Job ID 26 completed successfully'
+
+SIGHUP not supported: Restarting with SIGHUP is unstable on this platform!
