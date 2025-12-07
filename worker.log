@@ -38,3 +38,105 @@
 [2025-12-07 12:52:41,348: INFO/MainProcess] Task app.worker.tasks.execute_pipeline_task[ef21a0c4-f7b2-4d5c-8b23-f31d1991bc4d] succeeded in 0.15782316599506885s: 'Job ID 26 completed successfully'
 
 SIGHUP not supported: Restarting with SIGHUP is unstable on this platform!
+[2025-12-07 13:42:05,781: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[297cf4c5-2185-4507-87fb-ef6df388016f] received
+[2025-12-07 13:42:05,845: WARNING/MainProcess] 2025-12-07 13:42:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:42:05,973: WARNING/MainProcess] 2025-12-07 13:42:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:42:06,058: WARNING/MainProcess] 2025-12-07 13:42:06 [debug    ] No scheduled pipelines found
+[2025-12-07 13:42:06,059: WARNING/MainProcess] 2025-12-07 13:42:06 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.085067}
+[2025-12-07 13:42:06,063: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[297cf4c5-2185-4507-87fb-ef6df388016f] succeeded in 0.24916345800738782s: 'Scheduler heartbeat completed in 0.09s'
+[2025-12-07 13:43:05,755: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[37ec5b38-d9ff-4ada-a6c9-9f6a8707d2d9] received
+[2025-12-07 13:43:05,764: WARNING/MainProcess] 2025-12-07 13:43:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:43:05,765: WARNING/MainProcess] 2025-12-07 13:43:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:43:05,792: WARNING/MainProcess] 2025-12-07 13:43:05 [debug    ] No scheduled pipelines found
+[2025-12-07 13:43:05,793: WARNING/MainProcess] 2025-12-07 13:43:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.026795}
+[2025-12-07 13:43:05,798: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[37ec5b38-d9ff-4ada-a6c9-9f6a8707d2d9] succeeded in 0.039633874999708496s: 'Scheduler heartbeat completed in 0.03s'
+[2025-12-07 13:45:05,740: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[8ad3a156-01f8-4542-bacd-2e953c9441f9] received
+[2025-12-07 13:45:05,745: WARNING/MainProcess] 2025-12-07 13:45:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:45:05,745: WARNING/MainProcess] 2025-12-07 13:45:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:45:05,779: WARNING/MainProcess] 2025-12-07 13:45:05 [debug    ] No scheduled pipelines found
+[2025-12-07 13:45:05,779: WARNING/MainProcess] 2025-12-07 13:45:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.033532}
+[2025-12-07 13:45:05,781: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[8ad3a156-01f8-4542-bacd-2e953c9441f9] succeeded in 0.038456167007097974s: 'Scheduler heartbeat completed in 0.03s'
+[2025-12-07 13:47:05,753: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[78bc1169-0a84-483d-b882-39b016d783af] received
+[2025-12-07 13:47:05,756: WARNING/MainProcess] 2025-12-07 13:47:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:47:05,757: WARNING/MainProcess] 2025-12-07 13:47:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:47:05,771: WARNING/MainProcess] 2025-12-07 13:47:05 [debug    ] No scheduled pipelines found
+[2025-12-07 13:47:05,771: WARNING/MainProcess] 2025-12-07 13:47:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.014116}
+[2025-12-07 13:47:05,773: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[78bc1169-0a84-483d-b882-39b016d783af] succeeded in 0.01761854099459015s: 'Scheduler heartbeat completed in 0.01s'
+[2025-12-07 13:49:05,749: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[400e742f-660d-46c0-b6ea-6833087207ec] received
+[2025-12-07 13:49:05,752: WARNING/MainProcess] 2025-12-07 13:49:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:49:05,752: WARNING/MainProcess] 2025-12-07 13:49:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:49:05,765: WARNING/MainProcess] 2025-12-07 13:49:05 [debug    ] No scheduled pipelines found
+[2025-12-07 13:49:05,765: WARNING/MainProcess] 2025-12-07 13:49:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.013328}
+[2025-12-07 13:49:05,767: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[400e742f-660d-46c0-b6ea-6833087207ec] succeeded in 0.01658241699624341s: 'Scheduler heartbeat completed in 0.01s'
+[2025-12-07 13:51:05,751: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[11fdce44-e2eb-48f9-9a75-6ae73cc8eeb9] received
+[2025-12-07 13:51:05,755: WARNING/MainProcess] 2025-12-07 13:51:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:51:05,755: WARNING/MainProcess] 2025-12-07 13:51:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:51:05,764: WARNING/MainProcess] 2025-12-07 13:51:05 [debug    ] No scheduled pipelines found
+[2025-12-07 13:51:05,764: WARNING/MainProcess] 2025-12-07 13:51:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.00908}
+[2025-12-07 13:51:05,766: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[11fdce44-e2eb-48f9-9a75-6ae73cc8eeb9] succeeded in 0.013436083987471648s: 'Scheduler heartbeat completed in 0.01s'
+[2025-12-07 13:53:05,754: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[e9e1c1c0-9036-4ffd-aa2d-a6145f817853] received
+[2025-12-07 13:53:05,757: WARNING/MainProcess] 2025-12-07 13:53:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:53:05,758: WARNING/MainProcess] 2025-12-07 13:53:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:53:05,777: WARNING/MainProcess] 2025-12-07 13:53:05 [debug    ] No scheduled pipelines found
+[2025-12-07 13:53:05,778: WARNING/MainProcess] 2025-12-07 13:53:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.019952}
+[2025-12-07 13:53:05,779: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[e9e1c1c0-9036-4ffd-aa2d-a6145f817853] succeeded in 0.02352745800453704s: 'Scheduler heartbeat completed in 0.02s'
+[2025-12-07 13:55:05,751: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[ed98336a-1772-4b9a-8857-6f1739d32482] received
+[2025-12-07 13:55:05,755: WARNING/MainProcess] 2025-12-07 13:55:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:55:05,755: WARNING/MainProcess] 2025-12-07 13:55:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:55:05,773: WARNING/MainProcess] 2025-12-07 13:55:05 [debug    ] No scheduled pipelines found
+[2025-12-07 13:55:05,773: WARNING/MainProcess] 2025-12-07 13:55:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.017729}
+[2025-12-07 13:55:05,774: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[ed98336a-1772-4b9a-8857-6f1739d32482] succeeded in 0.021499875001609325s: 'Scheduler heartbeat completed in 0.02s'
+[2025-12-07 13:57:05,776: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[6139dc46-9594-4f3e-9d24-5179fb5e9e94] received
+[2025-12-07 13:57:05,781: WARNING/MainProcess] 2025-12-07 13:57:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:57:05,782: WARNING/MainProcess] 2025-12-07 13:57:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:57:05,814: WARNING/MainProcess] 2025-12-07 13:57:05 [debug    ] No scheduled pipelines found
+[2025-12-07 13:57:05,814: WARNING/MainProcess] 2025-12-07 13:57:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.032338}
+[2025-12-07 13:57:05,816: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[6139dc46-9594-4f3e-9d24-5179fb5e9e94] succeeded in 0.03852629198809154s: 'Scheduler heartbeat completed in 0.03s'
+[2025-12-07 13:59:05,775: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[b5ca2fd2-6b74-4cc5-b951-d2f84d52c4ee] received
+[2025-12-07 13:59:05,782: WARNING/MainProcess] 2025-12-07 13:59:05 [info     ] Scheduler heartbeat started
+[2025-12-07 13:59:05,783: WARNING/MainProcess] 2025-12-07 13:59:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 13:59:05,804: WARNING/MainProcess] 2025-12-07 13:59:05 [debug    ] No scheduled pipelines found
+[2025-12-07 13:59:05,804: WARNING/MainProcess] 2025-12-07 13:59:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.021417}
+[2025-12-07 13:59:05,806: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[b5ca2fd2-6b74-4cc5-b951-d2f84d52c4ee] succeeded in 0.02839120800490491s: 'Scheduler heartbeat completed in 0.02s'
+[2025-12-07 14:01:05,767: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[a8466e8d-7fe3-4486-85d3-3d05ddbbe5e6] received
+[2025-12-07 14:01:05,771: WARNING/MainProcess] 2025-12-07 14:01:05 [info     ] Scheduler heartbeat started
+[2025-12-07 14:01:05,772: WARNING/MainProcess] 2025-12-07 14:01:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 14:01:05,803: WARNING/MainProcess] 2025-12-07 14:01:05 [debug    ] No scheduled pipelines found
+[2025-12-07 14:01:05,803: WARNING/MainProcess] 2025-12-07 14:01:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.03161}
+[2025-12-07 14:01:05,806: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[a8466e8d-7fe3-4486-85d3-3d05ddbbe5e6] succeeded in 0.03684775000147056s: 'Scheduler heartbeat completed in 0.03s'
+[2025-12-07 14:03:05,767: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[2528b707-fe5a-44b1-9504-a4433e4d6fec] received
+[2025-12-07 14:03:05,778: WARNING/MainProcess] 2025-12-07 14:03:05 [info     ] Scheduler heartbeat started
+[2025-12-07 14:03:05,779: WARNING/MainProcess] 2025-12-07 14:03:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 14:03:05,806: WARNING/MainProcess] 2025-12-07 14:03:05 [debug    ] No scheduled pipelines found
+[2025-12-07 14:03:05,807: WARNING/MainProcess] 2025-12-07 14:03:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.028288}
+[2025-12-07 14:03:05,811: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[2528b707-fe5a-44b1-9504-a4433e4d6fec] succeeded in 0.03600833300151862s: 'Scheduler heartbeat completed in 0.03s'
+[2025-12-07 14:05:05,770: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[116eb192-17a1-4aae-81ac-44f05c757169] received
+[2025-12-07 14:05:05,775: WARNING/MainProcess] 2025-12-07 14:05:05 [info     ] Scheduler heartbeat started
+[2025-12-07 14:05:05,777: WARNING/MainProcess] 2025-12-07 14:05:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 14:05:05,801: WARNING/MainProcess] 2025-12-07 14:05:05 [debug    ] No scheduled pipelines found
+[2025-12-07 14:05:05,801: WARNING/MainProcess] 2025-12-07 14:05:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.024955}
+[2025-12-07 14:05:05,804: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[116eb192-17a1-4aae-81ac-44f05c757169] succeeded in 0.031001249997643754s: 'Scheduler heartbeat completed in 0.02s'
+[2025-12-07 14:07:05,774: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[6edebaf4-990f-44b4-aef3-4463a2ce62d5] received
+[2025-12-07 14:07:05,778: WARNING/MainProcess] 2025-12-07 14:07:05 [info     ] Scheduler heartbeat started
+[2025-12-07 14:07:05,780: WARNING/MainProcess] 2025-12-07 14:07:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 14:07:05,805: WARNING/MainProcess] 2025-12-07 14:07:05 [debug    ] No scheduled pipelines found
+[2025-12-07 14:07:05,805: WARNING/MainProcess] 2025-12-07 14:07:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.025137}
+[2025-12-07 14:07:05,807: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[6edebaf4-990f-44b4-aef3-4463a2ce62d5] succeeded in 0.031156500001088716s: 'Scheduler heartbeat completed in 0.03s'
+[2025-12-07 14:09:05,786: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[0d5d4944-45b9-4d68-a3db-9e7610a43cf9] received
+[2025-12-07 14:09:05,791: WARNING/MainProcess] 2025-12-07 14:09:05 [info     ] Scheduler heartbeat started
+[2025-12-07 14:09:05,792: WARNING/MainProcess] 2025-12-07 14:09:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 14:09:05,822: WARNING/MainProcess] 2025-12-07 14:09:05 [debug    ] No scheduled pipelines found
+[2025-12-07 14:09:05,823: WARNING/MainProcess] 2025-12-07 14:09:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.030464}
+[2025-12-07 14:09:05,827: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[0d5d4944-45b9-4d68-a3db-9e7610a43cf9] succeeded in 0.0389354579965584s: 'Scheduler heartbeat completed in 0.03s'
+[2025-12-07 14:11:05,778: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[653a3e7b-7679-4b1b-b27d-c189c585f316] received
+[2025-12-07 14:11:05,779: WARNING/MainProcess] 2025-12-07 14:11:05 [info     ] Scheduler heartbeat started
+[2025-12-07 14:11:05,780: WARNING/MainProcess] 2025-12-07 14:11:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 14:11:05,784: WARNING/MainProcess] 2025-12-07 14:11:05 [debug    ] No scheduled pipelines found
+[2025-12-07 14:11:05,784: WARNING/MainProcess] 2025-12-07 14:11:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.003884}
+[2025-12-07 14:11:05,785: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[653a3e7b-7679-4b1b-b27d-c189c585f316] succeeded in 0.006396832992322743s: 'Scheduler heartbeat completed in 0.00s'
+[2025-12-07 14:13:05,791: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[3fb7bde7-dd8e-40e9-b2f5-fc7c58e019aa] received
+[2025-12-07 14:13:05,798: WARNING/MainProcess] 2025-12-07 14:13:05 [info     ] Scheduler heartbeat started
+[2025-12-07 14:13:05,799: WARNING/MainProcess] 2025-12-07 14:13:05 [info     ] Scheduler: Checking schedules...
+[2025-12-07 14:13:05,822: WARNING/MainProcess] 2025-12-07 14:13:05 [debug    ] No scheduled pipelines found
+[2025-12-07 14:13:05,822: WARNING/MainProcess] 2025-12-07 14:13:05 [info     ] Scheduler heartbeat completed  extra={'duration_seconds': 0.022802}
+[2025-12-07 14:13:05,824: INFO/MainProcess] Task app.worker.tasks.scheduler_heartbeat[3fb7bde7-dd8e-40e9-b2f5-fc7c58e019aa] succeeded in 0.030262416999903508s: 'Scheduler heartbeat completed in 0.02s'

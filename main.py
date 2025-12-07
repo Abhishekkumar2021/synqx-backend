@@ -80,7 +80,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 from app.api.v1.api import api_router
 
-
 @app.get("/", tags=["System"])
 async def root():
     return {"app": settings.APP_NAME, "status": "ok", "docs": "/docs"}
