@@ -133,6 +133,74 @@ class PipelineService:
             logger.error(f"Unexpected error creating pipeline: {e}", exc_info=True)
             raise AppError(f"Failed to create pipeline: {e}") from e
 
+    def create_pipeline_version(
+        self, pipeline_id: int, version_data: PipelineVersionCreate
+    ) -> PipelineVersion:
+        """
+        Creates a new version for an existing pipeline.
+        """
+        pipeline = self.get_pipeline(pipeline_id)
+        if not pipeline:
+            raise AppError(f"Pipeline {pipeline_id} not found")
+
+        try:
+            # Validate configuration
+            self._validate_pipeline_configuration(version_data)
+
+            # Determine next version number
+            last_version = (
+                self.db_session.query(PipelineVersion)
+                .filter(PipelineVersion.pipeline_id == pipeline_id)
+                .order_by(PipelineVersion.version.desc())
+                .first()
+            )
+            next_version_num = (last_version.version + 1) if last_version else 1
+
+            # Create Version
+            db_version = self._create_pipeline_version(
+                pipeline_id,
+                version_data,
+                version_number=next_version_num,
+                is_published=False,
+            )
+            self.db_session.add(db_version)
+            self.db_session.flush()
+
+            # Create Nodes
+            self._create_pipeline_nodes(
+                db_version.id,
+                version_data.nodes,
+            )
+            self.db_session.flush()
+
+            # Create Edges
+            self._create_pipeline_edges(
+                db_version.id,
+                version_data.edges,
+            )
+
+            # Update pipeline current version pointer (optional, usually points to published)
+            # But maybe we want to track "latest draft"?
+            # pipeline.current_version = next_version_num # existing logic in create_pipeline did this
+
+            self.db_session.commit()
+            self.db_session.refresh(db_version)
+            
+            logger.info(
+                f"Created version {next_version_num} for pipeline {pipeline_id}",
+                extra={"pipeline_id": pipeline_id, "version": next_version_num},
+            )
+
+            return db_version
+
+        except ConfigurationError as e:
+            self.db_session.rollback()
+            raise
+        except Exception as e:
+            self.db_session.rollback()
+            logger.error(f"Failed to create pipeline version: {e}", exc_info=True)
+            raise AppError(f"Failed to create pipeline version: {e}") from e
+
     def update_pipeline(
         self, pipeline_id: int, pipeline_update: PipelineUpdate
     ) -> Pipeline:

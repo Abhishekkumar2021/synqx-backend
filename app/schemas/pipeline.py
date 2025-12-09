@@ -145,8 +145,17 @@ class PipelineBase(BaseModel):
     schedule_timezone: str = Field(default="UTC", max_length=50)
     max_parallel_runs: int = Field(default=1, ge=1, le=100)
     execution_timeout_seconds: Optional[int] = Field(None, gt=0, le=86400)
-    tags: Dict[str, Any] = Field(default_factory=dict)
+    tags: Optional[Dict[str, Any]] = Field(default_factory=dict)
     priority: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def validate_tags(cls, v):
+        if v is None:
+            return {}
+        if isinstance(v, list) and not v:
+            return {}
+        return v
 
     @field_validator("schedule_cron")
     @classmethod

@@ -8,6 +8,7 @@ from app.schemas.pipeline import (
     PipelineUpdate,
     PipelineDetailRead,
     PipelineListResponse,
+    PipelineVersionCreate,
     PipelineVersionRead,
     PipelineVersionSummary,
     PipelineTriggerRequest,
@@ -283,6 +284,46 @@ def trigger_pipeline_run(
             detail={
                 "error": "Internal server error",
                 "message": "Failed to trigger pipeline run",
+            },
+        )
+
+
+@router.post(
+    "/{pipeline_id}/versions",
+    response_model=PipelineVersionRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create Pipeline Version",
+    description="Create a new version of the pipeline with updated nodes and edges",
+)
+def create_pipeline_version(
+    pipeline_id: int,
+    version_create: PipelineVersionCreate,
+    db: Session = Depends(get_db),
+):
+    try:
+        service = PipelineService(db)
+        version = service.create_pipeline_version(pipeline_id, version_create)
+        return PipelineVersionRead.model_validate(version)
+
+    except ConfigurationError as e:
+        logger.error(f"Configuration error creating version: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "Configuration error", "message": str(e)},
+        )
+    except AppError as e:
+        logger.error(f"Error creating version for pipeline {pipeline_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error creating version: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to create pipeline version",
             },
         )
 
