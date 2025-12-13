@@ -3,6 +3,8 @@ fastapi
 uvicorn[standard]
 pydantic
 pydantic-settings
+setuptools
+email-validator
 
 # Database - System DB
 sqlalchemy
@@ -20,6 +22,8 @@ redis
 snowflake-connector-python
 snowflake-sqlalchemy
 google-cloud-bigquery
+boto3
+s3fs
 
 # Task Queue (keeping Celery as alternative to Prefect)
 celery
@@ -29,6 +33,10 @@ kombu
 # Security & Encryption
 cryptography
 python-multipart
+passlib[bcrypt]
+python-jose[cryptography]
+bcrypt
+
 
 # Data Processing
 pandas

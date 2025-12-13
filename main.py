@@ -1,3 +1,4 @@
+import setuptools  # Patch for Python 3.12+ distutils removal
 import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator

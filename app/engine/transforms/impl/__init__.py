@@ -8,6 +8,8 @@ from app.engine.transforms.impl.rename_columns_transform import RenameColumnsTra
 from app.engine.transforms.impl.drop_columns_transform import DropColumnsTransform
 from app.engine.transforms.impl.deduplicate_transform import DeduplicateTransform
 from app.engine.transforms.impl.fill_nulls_transform import FillNullsTransform
+from app.engine.transforms.impl.sort_transform import SortTransform
+from app.engine.transforms.impl.regex_replace_transform import RegexReplaceTransform
 
 TransformFactory.register_transform("pandas_transform", PandasTransform)
 TransformFactory.register_transform("filter", FilterTransform)
@@ -18,3 +20,5 @@ TransformFactory.register_transform("rename_columns", RenameColumnsTransform)
 TransformFactory.register_transform("drop_columns", DropColumnsTransform)
 TransformFactory.register_transform("deduplicate", DeduplicateTransform)
 TransformFactory.register_transform("fill_nulls", FillNullsTransform)
+TransformFactory.register_transform("sort", SortTransform)
+TransformFactory.register_transform("regex_replace", RegexReplaceTransform)

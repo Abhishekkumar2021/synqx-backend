@@ -26,6 +26,7 @@ from app.models.connections import Connection, Asset, AssetSchemaVersion
 from app.models.pipelines import Pipeline, PipelineVersion, PipelineNode, PipelineEdge
 from app.models.execution import Job, PipelineRun, StepRun, PipelineRunContext, Watermark
 from app.models.monitoring import SchedulerEvent, JobLog, StepLog, AlertConfig, Alert
+from app.models.user import User
 
 # Export all models for Alembic and easy access
 __all__ = [
@@ -50,6 +51,7 @@ __all__ = [
     "AlertDeliveryMethod",
 
     # Models
+    "User",
     "Connection",
     "Asset",
     "AssetSchemaVersion",

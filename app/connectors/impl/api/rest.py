@@ -2,6 +2,22 @@ from typing import Any, Dict, Iterator, List, Optional, Union
 import httpx
 import pandas as pd
 from app.connectors.base import BaseConnector
+from app.core.errors import ConfigurationError, ConnectionFailedError, DataTransferError
+from pydantic import Field, AnyHttpUrl
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class RestApiConfig(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
+    
+    base_url: str = Field(..., description="Base URL of the API")
+    auth_type: str = Field("none", description="Auth Type: none, basic, bearer, api_key")
+    auth_username: Optional[str] = Field(None, description="Username for Basic Auth")
+    auth_password: Optional[str] = Field(None, description="Password for Basic Auth")
+    auth_token: Optional[str] = Field(None, description="Bearer Token")
+    api_key_name: Optional[str] = Field("X-API-Key", description="API Key Name")
+    api_key_value: Optional[str] = Field(None, description="API Key Value")
+    api_key_in: str = Field("header", description="API Key Location: header or query")
+    timeout: float = Field(30.0, description="Request timeout in seconds")
 
 
 class RestApiConnector(BaseConnector):
@@ -11,36 +27,45 @@ class RestApiConnector(BaseConnector):
     """
 
     def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+        self._config_model: Optional[RestApiConfig] = None
         self.client: Optional[httpx.Client] = None
-        self.base_url = self.config.get("base_url")
-        self.auth_config = self.config.get("auth", {})
-        self.headers = self.config.get("headers", {})
-        self.timeout = self.config.get("timeout", 30.0)
+        super().__init__(config)
 
     def validate_config(self) -> None:
-        if not self.config.get("base_url"):
-            raise ValueError("Configuration 'base_url' is required for RestApiConnector.")
+        try:
+            self._config_model = RestApiConfig.model_validate(self.config)
+        except Exception as e:
+            raise ConfigurationError(f"Invalid REST API configuration: {e}")
 
     def connect(self) -> None:
-        # Prepare auth
+        if self.client:
+            return
+
+        headers = {}
         auth = None
-        if self.auth_config.get("type") == "basic":
-            auth = (self.auth_config["username"], self.auth_config["password"])
-        elif self.auth_config.get("type") == "bearer":
-            self.headers["Authorization"] = f"Bearer {self.auth_config['token']}"
-        elif self.auth_config.get("type") == "api_key":
-            key_name = self.auth_config.get("key_name", "X-API-Key")
-            key_value = self.auth_config.get("key_value")
-            if self.auth_config.get("in") == "header":
-                self.headers[key_name] = key_value
-            # 'query' param handling would need to be in request
+        params = {}
+
+        if self._config_model.auth_type == "basic":
+            if self._config_model.auth_username and self._config_model.auth_password:
+                auth = (self._config_model.auth_username, self._config_model.auth_password)
+        
+        elif self._config_model.auth_type == "bearer":
+             if self._config_model.auth_token:
+                headers["Authorization"] = f"Bearer {self._config_model.auth_token}"
+        
+        elif self._config_model.auth_type == "api_key":
+            if self._config_model.api_key_value:
+                if self._config_model.api_key_in == "header":
+                    headers[self._config_model.api_key_name] = self._config_model.api_key_value
+                else:
+                    params[self._config_model.api_key_name] = self._config_model.api_key_value
 
         self.client = httpx.Client(
-            base_url=self.base_url,
-            headers=self.headers,
+            base_url=self._config_model.base_url,
+            headers=headers,
+            params=params,
             auth=auth,
-            timeout=self.timeout
+            timeout=self._config_model.timeout
         )
 
     def disconnect(self) -> None:
@@ -51,18 +76,22 @@ class RestApiConnector(BaseConnector):
     def test_connection(self) -> bool:
         try:
             with self.session():
-                # Try a health check endpoint if configured, else root
-                endpoint = self.config.get("health_endpoint", "/")
-                response = self.client.get(endpoint)
-                return response.status_code < 500
+                # Try root or a health endpoint if we could configure it. 
+                # For generic, we just check if we can make a request to root or just connect.
+                # Since we can't know a valid endpoint for sure, we'll try root '/'
+                # A 404 is technically a successful connection to the server.
+                response = self.client.get("/")
+                return True
         except Exception:
+            # If root fails, maybe it doesn't exist. We can't be 100% sure without a known endpoint.
+            # But usually 'connect' passing means we are good enough config-wise.
             return False
 
     def discover_assets(
         self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
     ) -> List[Dict[str, Any]]:
         # REST APIs don't typically expose "tables", but we can list configured endpoints if we had a schema.
-        # For now, we return a dummy "endpoint" asset.
+        # For now, we return a dummy "endpoint" asset or user provided endpoints.
         return [{"name": "endpoint", "type": "api"}]
 
     def infer_schema(
@@ -72,10 +101,34 @@ class RestApiConnector(BaseConnector):
         mode: str = "auto",
         **kwargs,
     ) -> Dict[str, Any]:
-        # Fetch one record to infer schema
-        # This is highly dependent on the API structure.
-        # Assuming the API returns a list of objects or a single object.
-        return {"type": "json", "fields": {}}
+        
+        self.connect()
+        try:
+            # Asset is the endpoint path, e.g., "/users"
+            # We assume it returns a JSON list or object.
+            response = self.client.get(asset)
+            response.raise_for_status()
+            data = response.json()
+            
+            records = self._normalize_response(data)
+            
+            if not records:
+                 return {"asset": asset, "columns": [], "format": "json"}
+
+            df = pd.DataFrame(records[:sample_size])
+             
+            columns = [
+                {"name": col, "type": str(dtype)}
+                for col, dtype in df.dtypes.items()
+            ]
+            return {
+                "asset": asset,
+                "columns": columns,
+                "format": "json"
+            }
+        except Exception as e:
+            # Fallback
+             return {"asset": asset, "columns": [], "error": str(e)}
 
     def read_batch(
         self,
@@ -84,11 +137,8 @@ class RestApiConnector(BaseConnector):
         offset: Optional[int] = None,
         **kwargs,
     ) -> Iterator[pd.DataFrame]:
-        """
-        Reads from the API. 'asset' is treated as the endpoint path.
-        """
-        if not self.client:
-            raise ConnectionError("Not connected")
+        
+        self.connect()
 
         # Handle pagination params (generic)
         params = kwargs.get("params", {}).copy()
@@ -103,19 +153,7 @@ class RestApiConnector(BaseConnector):
             response.raise_for_status()
             data = response.json()
 
-            # Normalize data to list of dicts
-            if isinstance(data, dict):
-                # Try to find the list wrapper if it exists (e.g. {"data": [...]})
-                if "data" in data and isinstance(data["data"], list):
-                    records = data["data"]
-                elif "items" in data and isinstance(data["items"], list):
-                    records = data["items"]
-                else:
-                    records = [data] # Single object
-            elif isinstance(data, list):
-                records = data
-            else:
-                records = []
+            records = self._normalize_response(data)
 
             if records:
                 df = pd.DataFrame(records)
@@ -124,8 +162,23 @@ class RestApiConnector(BaseConnector):
                 yield pd.DataFrame()
                 
         except Exception as e:
-            # In a real system, we might log this
-            raise RuntimeError(f"Failed to read from REST API: {e}")
+            raise DataTransferError(f"Failed to read from REST API: {e}")
+
+    def _normalize_response(self, data: Any) -> List[Dict[str, Any]]:
+        if isinstance(data, dict):
+            # Try to find the list wrapper if it exists (e.g. {"data": [...]})
+            if "data" in data and isinstance(data["data"], list):
+                return data["data"]
+            elif "items" in data and isinstance(data["items"], list):
+                return data["items"]
+            elif "results" in data and isinstance(data["results"], list):
+                return data["results"]
+            else:
+                return [data] # Single object
+        elif isinstance(data, list):
+            return data
+        else:
+            return []
 
     def write_batch(
         self,
@@ -134,17 +187,15 @@ class RestApiConnector(BaseConnector):
         mode: str = "append",
         **kwargs,
     ) -> int:
-        """
-        Writes to the API. 'asset' is treated as the endpoint path.
-        Mode 'append' = POST, 'replace' = PUT (generic assumption).
-        """
-        if not self.client:
-            raise ConnectionError("Not connected")
-
+        
+        self.connect()
         count = 0
         method = "PUT" if mode == "replace" else "POST"
 
-        iterator = [data] if isinstance(data, pd.DataFrame) else data
+        if isinstance(data, pd.DataFrame):
+            iterator = [data]
+        else:
+            iterator = data
 
         for df in iterator:
             records = df.to_dict(orient="records")
@@ -157,9 +208,8 @@ class RestApiConnector(BaseConnector):
                     
                     response.raise_for_status()
                     count += 1
-                except Exception:
-                    # Continue or fail depending on strictness. 
-                    # For now, we propagate error.
-                    raise
+                except Exception as e:
+                    # Depending on policy, we might want to stop or log errors
+                    raise DataTransferError(f"Failed to write record to {asset}: {e}")
         
         return count

@@ -25,5 +25,15 @@ class SchemaDiscoveryError(ConnectorError):
     pass
 
 class DataTransferError(ConnectorError):
+
     """Raised during data read/write operations."""
+
+    pass
+
+
+
+class TransformationError(AppError):
+
+    """Raised during data transformation operations."""
+
     pass

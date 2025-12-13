@@ -1,7 +1,7 @@
 from typing import Iterator, Dict, Any, List, Optional
 import pandas as pd
 from app.engine.transforms.base import BaseTransform
-from app.core.errors import ConfigurationError
+from app.core.errors import ConfigurationError, TransformationError
 
 class FilterTransform(BaseTransform):
     """
@@ -17,8 +17,12 @@ class FilterTransform(BaseTransform):
     def transform(self, data: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         condition = self.config["condition"]
         for df in data:
+            if df.empty:
+                yield df
+                continue
             try:
                 # Pandas query method is relatively safe for simple expressions
                 yield df.query(condition)
             except Exception as e:
-                raise ConfigurationError(f"Filter failed with condition '{condition}': {e}")
+                # Wrap pandas errors in our TransformationError
+                raise TransformationError(f"Filter failed with condition '{condition}': {e}")

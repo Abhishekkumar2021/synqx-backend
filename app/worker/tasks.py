@@ -1,3 +1,4 @@
+import setuptools  # Patch for Python 3.12+ distutils removal
 from datetime import datetime, timezone
 from typing import Optional
 from celery.exceptions import SoftTimeLimitExceeded, Retry
