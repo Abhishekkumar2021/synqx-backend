@@ -31,7 +31,7 @@ class ConnectionService:
     def __init__(self, db_session: Session):
         self.db_session = db_session
 
-    def create_connection(self, connection_create: ConnectionCreate) -> Connection:
+    def create_connection(self, connection_create: ConnectionCreate, user_id: int) -> Connection:
         try:
             encrypted_config = VaultService.encrypt_config(connection_create.config)
             connection = Connection(
@@ -43,6 +43,8 @@ class ConnectionService:
                 max_concurrent_connections=connection_create.max_concurrent_connections,
                 connection_timeout_seconds=connection_create.connection_timeout_seconds,
                 health_status="unknown",
+                user_id=user_id,
+                created_by=str(user_id)
             )
             self.db_session.add(connection)
             self.db_session.flush()
@@ -66,14 +68,13 @@ class ConnectionService:
             self.db_session.rollback()
             raise AppError(f"Failed to create connection: {str(e)}")
 
-    def get_connection(self, connection_id: int) -> Optional[Connection]:
-        return (
-            self.db_session.query(Connection)
-            .filter(
-                and_(Connection.id == connection_id, Connection.deleted_at.is_(None))
-            )
-            .first()
+    def get_connection(self, connection_id: int, user_id: Optional[int] = None) -> Optional[Connection]:
+        query = self.db_session.query(Connection).filter(
+            and_(Connection.id == connection_id, Connection.deleted_at.is_(None))
         )
+        if user_id is not None:
+            query = query.filter(Connection.user_id == user_id)
+        return query.first()
 
     def list_connections(
         self,
@@ -81,11 +82,15 @@ class ConnectionService:
         health_status: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        user_id: Optional[int] = None,
     ) -> Tuple[List[Connection], int]:
 
         query = self.db_session.query(Connection).filter(
             Connection.deleted_at.is_(None)
         )
+        if user_id is not None:
+            query = query.filter(Connection.user_id == user_id)
+
         if connector_type:
             query = query.filter(Connection.connector_type == connector_type)
         if health_status:
@@ -100,9 +105,9 @@ class ConnectionService:
         return items, total
 
     def update_connection(
-        self, connection_id: int, connection_update: ConnectionUpdate
+        self, connection_id: int, connection_update: ConnectionUpdate, user_id: Optional[int] = None
     ) -> Connection:
-        connection = self.get_connection(connection_id)
+        connection = self.get_connection(connection_id, user_id=user_id)
         if not connection:
             raise AppError(f"Connection {connection_id} not found")
 
@@ -133,6 +138,9 @@ class ConnectionService:
                     None if test_result["success"] else test_result["message"]
                 )
             connection.updated_at = datetime.now(timezone.utc)
+            if user_id:
+                connection.updated_by = str(user_id)
+                
             self.db_session.commit()
             self.db_session.refresh(connection)
             return connection
@@ -143,8 +151,8 @@ class ConnectionService:
             self.db_session.rollback()
             raise AppError(f"Failed to update connection: {str(e)}")
 
-    def delete_connection(self, connection_id: int, hard_delete: bool = False) -> bool:
-        connection = self.get_connection(connection_id)
+    def delete_connection(self, connection_id: int, hard_delete: bool = False, user_id: Optional[int] = None) -> bool:
+        connection = self.get_connection(connection_id, user_id=user_id)
         if not connection:
             raise AppError(f"Connection {connection_id} not found")
 
@@ -154,6 +162,8 @@ class ConnectionService:
             else:
                 connection.deleted_at = datetime.now(timezone.utc)
                 connection.health_status = "deleted"
+                if user_id:
+                    connection.deleted_by = str(user_id)
             self.db_session.commit()
             return True
         except Exception as e:
@@ -161,9 +171,9 @@ class ConnectionService:
             raise AppError(f"Failed to delete connection: {str(e)}")
 
     def test_connection(
-        self, connection_id: int, custom_config: Optional[Dict[str, Any]] = None
+        self, connection_id: int, custom_config: Optional[Dict[str, Any]] = None, user_id: Optional[int] = None
     ) -> ConnectionTestResponse:
-        connection = self.get_connection(connection_id)
+        connection = self.get_connection(connection_id, user_id=user_id)
         if not connection:
             raise AppError(f"Connection {connection_id} not found")
 
@@ -207,8 +217,9 @@ class ConnectionService:
                 "details": {"error_type": type(e).__name__},
             }
 
-    def create_asset(self, asset_create: AssetCreate) -> Asset:
-        connection = self.get_connection(asset_create.connection_id)
+    def create_asset(self, asset_create: AssetCreate, user_id: Optional[int] = None) -> Asset:
+        # verifying connection ownership
+        connection = self.get_connection(asset_create.connection_id, user_id=user_id)
         if not connection:
             raise AppError(f"Connection {asset_create.connection_id} not found")
 
@@ -226,6 +237,7 @@ class ConnectionService:
                 schema_metadata=asset_create.schema_metadata,
                 row_count_estimate=asset_create.row_count_estimate,
                 size_bytes_estimate=asset_create.size_bytes_estimate,
+                created_by=str(user_id) if user_id else None
             )
             self.db_session.add(asset)
             self.db_session.commit()
@@ -240,12 +252,11 @@ class ConnectionService:
             self.db_session.rollback()
             raise AppError(f"Failed to create asset: {str(e)}")
 
-    def get_asset(self, asset_id: int) -> Optional[Asset]:
-        return (
-            self.db_session.query(Asset)
-            .filter(and_(Asset.id == asset_id, Asset.deleted_at.is_(None)))
-            .first()
-        )
+    def get_asset(self, asset_id: int, user_id: Optional[int] = None) -> Optional[Asset]:
+        query = self.db_session.query(Asset).join(Connection).filter(and_(Asset.id == asset_id, Asset.deleted_at.is_(None)))
+        if user_id is not None:
+            query = query.filter(Connection.user_id == user_id)
+        return query.first()
 
     def list_assets(
         self,
@@ -255,10 +266,13 @@ class ConnectionService:
         is_destination: Optional[bool] = None,
         limit: int = 100,
         offset: int = 0,
+        user_id: Optional[int] = None,
     ) -> Tuple[List[Asset], int]:
 
-        query = self.db_session.query(Asset).filter(Asset.deleted_at.is_(None))
+        query = self.db_session.query(Asset).join(Connection).filter(Asset.deleted_at.is_(None))
 
+        if user_id is not None:
+            query = query.filter(Connection.user_id == user_id)
         if connection_id:
             query = query.filter(Asset.connection_id == connection_id)
         if asset_type:
@@ -274,8 +288,8 @@ class ConnectionService:
         )
         return items, total
 
-    def update_asset(self, asset_id: int, asset_update: AssetUpdate) -> Asset:
-        asset = self.get_asset(asset_id)
+    def update_asset(self, asset_id: int, asset_update: AssetUpdate, user_id: Optional[int] = None) -> Asset:
+        asset = self.get_asset(asset_id, user_id=user_id)
         if not asset:
             raise AppError(f"Asset {asset_id} not found")
 
@@ -300,6 +314,8 @@ class ConnectionService:
                 asset.schema_metadata = asset_update.schema_metadata
 
             asset.updated_at = datetime.now(timezone.utc)
+            if user_id:
+                asset.updated_by = str(user_id)
             self.db_session.commit()
             self.db_session.refresh(asset)
             return asset
@@ -310,8 +326,8 @@ class ConnectionService:
             self.db_session.rollback()
             raise AppError(f"Failed to update asset: {str(e)}")
 
-    def delete_asset(self, asset_id: int, hard_delete: bool = False) -> bool:
-        asset = self.get_asset(asset_id)
+    def delete_asset(self, asset_id: int, hard_delete: bool = False, user_id: Optional[int] = None) -> bool:
+        asset = self.get_asset(asset_id, user_id=user_id)
         if not asset:
             raise AppError(f"Asset {asset_id} not found")
 
@@ -320,6 +336,8 @@ class ConnectionService:
                 self.db_session.delete(asset)
             else:
                 asset.deleted_at = datetime.now(timezone.utc)
+                if user_id:
+                    asset.deleted_by = str(user_id)
             self.db_session.commit()
             return True
         except Exception as e:
@@ -331,8 +349,9 @@ class ConnectionService:
         connection_id: int,
         include_metadata: bool = False,
         pattern: Optional[str] = None,
+        user_id: Optional[int] = None,
     ) -> AssetDiscoverResponse:
-        connection = self.get_connection(connection_id)
+        connection = self.get_connection(connection_id, user_id=user_id)
         if not connection:
             raise AppError(f"Connection {connection_id} not found")
 
@@ -360,9 +379,9 @@ class ConnectionService:
             raise AppError(f"Failed to discover assets: {str(e)}")
 
     def discover_schema(
-        self, asset_id: int, sample_size: int = 1000, force_refresh: bool = False
+        self, asset_id: int, sample_size: int = 1000, force_refresh: bool = False, user_id: Optional[int] = None
     ) -> SchemaDiscoveryResponse:
-        asset = self.get_asset(asset_id)
+        asset = self.get_asset(asset_id, user_id=user_id)
         if not asset:
             raise AppError(f"Asset {asset_id} not found")
 
@@ -397,7 +416,7 @@ class ConnectionService:
                     schema_version=latest.version,
                     is_breaking_change=False,
                     message="Schema unchanged",
-                    schema=schema,
+                    discovered_schema=schema,
                 )
 
             schema_version = AssetSchemaVersion(
@@ -419,7 +438,7 @@ class ConnectionService:
                 schema_version=next_version,
                 is_breaking_change=breaking,
                 message=f"Schema version {next_version} created",
-                schema=schema,
+                discovered_schema=schema,
             )
         except Exception as e:
             self.db_session.rollback()

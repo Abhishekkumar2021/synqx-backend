@@ -2,6 +2,8 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from sqlalchemy.orm import Session
 
+from app import models
+from app.api import deps
 from app.schemas.connection import (
     ConnectionCreate,
     ConnectionUpdate,
@@ -22,7 +24,6 @@ from app.schemas.connection import (
     AssetSchemaVersionRead,
 )
 from app.services.connection_service import ConnectionService
-from app.api.deps import get_db
 from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.models.enums import ConnectorType
@@ -43,11 +44,12 @@ logger = get_logger(__name__)
 )
 def create_connection(
     connection_create: ConnectionCreate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
-        connection = service.create_connection(connection_create)
+        connection = service.create_connection(connection_create, user_id=current_user.id)
         response = ConnectionDetailRead.model_validate(connection)
         response.asset_count = len(connection.assets) if connection.assets else 0
         return response
@@ -81,7 +83,8 @@ def list_connections(
     health_status: Optional[str] = Query(None, description="Filter by health status"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
@@ -90,6 +93,7 @@ def list_connections(
             health_status=health_status,
             limit=limit,
             offset=offset,
+            user_id=current_user.id,
         )
         return ConnectionListResponse(
             connections=[ConnectionRead.model_validate(c) for c in connections],
@@ -116,10 +120,11 @@ def list_connections(
 )
 def get_connection(
     connection_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     service = ConnectionService(db)
-    connection = service.get_connection(connection_id)
+    connection = service.get_connection(connection_id, user_id=current_user.id)
     if not connection:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -142,14 +147,20 @@ def get_connection(
 def update_connection(
     connection_id: int,
     connection_update: ConnectionUpdate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
-        connection = service.update_connection(connection_id, connection_update)
+        connection = service.update_connection(connection_id, connection_update, user_id=current_user.id)
         return ConnectionRead.model_validate(connection)
     except AppError as e:
         logger.error(f"Error updating connection {connection_id}: {e}")
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -176,14 +187,20 @@ def update_connection(
 def delete_connection(
     connection_id: int,
     hard_delete: bool = Query(False, description="Permanently delete from database"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
-        service.delete_connection(connection_id, hard_delete=hard_delete)
+        service.delete_connection(connection_id, hard_delete=hard_delete, user_id=current_user.id)
         return None
     except AppError as e:
         logger.error(f"Error deleting connection {connection_id}: {e}")
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -210,16 +227,22 @@ def delete_connection(
 def test_connection(
     connection_id: int,
     test_request: ConnectionTestRequest = Body(default=ConnectionTestRequest()),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
         result = service.test_connection(
-            connection_id, custom_config=test_request.config
+            connection_id, custom_config=test_request.config, user_id=current_user.id
         )
         return result
     except AppError as e:
         logger.error(f"Error testing connection {connection_id}: {e}")
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -246,7 +269,8 @@ def test_connection(
 def discover_assets(
     connection_id: int,
     discover_request: AssetDiscoverRequest = Body(default=AssetDiscoverRequest()),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
@@ -254,10 +278,16 @@ def discover_assets(
             connection_id=connection_id,
             include_metadata=discover_request.include_metadata,
             pattern=discover_request.pattern,
+            user_id=current_user.id,
         )
         return result
     except AppError as e:
         logger.error(f"Error discovering assets for connection {connection_id}: {e}")
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -287,7 +317,8 @@ def list_connection_assets(
     ),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
@@ -298,6 +329,7 @@ def list_connection_assets(
             is_destination=is_destination,
             limit=limit,
             offset=offset,
+            user_id=current_user.id,
         )
         return AssetListResponse(
             assets=[AssetRead.model_validate(a) for a in assets],
@@ -326,13 +358,14 @@ def list_connection_assets(
 def create_asset(
     connection_id: int,
     asset_create: AssetCreate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         asset_create.connection_id = connection_id
 
         service = ConnectionService(db)
-        asset = service.create_asset(asset_create)
+        asset = service.create_asset(asset_create, user_id=current_user.id)
         response = AssetDetailRead.model_validate(asset)
         response.connection_name = asset.connection.name if asset.connection else None
         response.schema_version_count = (
@@ -341,6 +374,11 @@ def create_asset(
         return response
     except AppError as e:
         logger.error(f"Error creating asset: {e}")
+        if "not found" in str(e).lower():
+             raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -365,10 +403,11 @@ def create_asset(
 def get_asset(
     connection_id: int,
     asset_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     service = ConnectionService(db)
-    asset = service.get_asset(asset_id)
+    asset = service.get_asset(asset_id, user_id=current_user.id)
 
     if not asset:
         raise HTTPException(
@@ -409,11 +448,13 @@ def update_asset(
     connection_id: int,
     asset_id: int,
     asset_update: AssetUpdate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
-        asset = service.get_asset(asset_id)
+        # Check existence and permission via service
+        asset = service.get_asset(asset_id, user_id=current_user.id)
 
         if not asset:
             raise HTTPException(
@@ -430,12 +471,17 @@ def update_asset(
                 },
             )
 
-        asset = service.update_asset(asset_id, asset_update)
+        asset = service.update_asset(asset_id, asset_update, user_id=current_user.id)
         return AssetRead.model_validate(asset)
     except HTTPException:
         raise
     except AppError as e:
         logger.error(f"Error updating asset {asset_id}: {e}")
+        if "not found" in str(e).lower():
+             raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -461,11 +507,12 @@ def delete_asset(
     connection_id: int,
     asset_id: int,
     hard_delete: bool = Query(False, description="Permanently delete from database"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
-        asset = service.get_asset(asset_id)
+        asset = service.get_asset(asset_id, user_id=current_user.id)
 
         if not asset:
             raise HTTPException(
@@ -482,12 +529,17 @@ def delete_asset(
                 },
             )
 
-        service.delete_asset(asset_id, hard_delete=hard_delete)
+        service.delete_asset(asset_id, hard_delete=hard_delete, user_id=current_user.id)
         return None
     except HTTPException:
         raise
     except AppError as e:
         logger.error(f"Error deleting asset {asset_id}: {e}")
+        if "not found" in str(e).lower():
+             raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -513,11 +565,12 @@ def discover_schema(
     connection_id: int,
     asset_id: int,
     discovery_request: SchemaDiscoveryRequest = Body(default=SchemaDiscoveryRequest()),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = ConnectionService(db)
-        asset = service.get_asset(asset_id)
+        asset = service.get_asset(asset_id, user_id=current_user.id)
 
         if not asset:
             raise HTTPException(
@@ -538,12 +591,18 @@ def discover_schema(
             asset_id=asset_id,
             sample_size=discovery_request.sample_size,
             force_refresh=discovery_request.force_refresh,
+            user_id=current_user.id,
         )
         return result
     except HTTPException:
         raise
     except AppError as e:
         logger.error(f"Error discovering schema for asset {asset_id}: {e}")
+        if "not found" in str(e).lower():
+             raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -568,10 +627,11 @@ def discover_schema(
 def list_schema_versions(
     connection_id: int,
     asset_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     service = ConnectionService(db)
-    asset = service.get_asset(asset_id)
+    asset = service.get_asset(asset_id, user_id=current_user.id)
 
     if not asset:
         raise HTTPException(

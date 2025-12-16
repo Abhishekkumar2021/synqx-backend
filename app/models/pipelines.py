@@ -7,7 +7,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
-from app.models.base import Base, AuditMixin, SoftDeleteMixin
+from app.models.base import Base, AuditMixin, SoftDeleteMixin, OwnerMixin
 from app.models.enums import PipelineStatus, OperatorType
 
 if TYPE_CHECKING:
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from app.models.execution import Job, PipelineRun
     from app.models.monitoring import SchedulerEvent
 
-class Pipeline(Base, AuditMixin, SoftDeleteMixin):
+class Pipeline(Base, AuditMixin, SoftDeleteMixin, OwnerMixin):
     __tablename__ = "pipelines"
 
     id: Mapped[int] = mapped_column(primary_key=True)

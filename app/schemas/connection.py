@@ -193,4 +193,4 @@ class SchemaDiscoveryResponse(BaseModel):
     schema_version: Optional[int] = None
     is_breaking_change: bool = False
     message: str
-    schema: Optional[Dict[str, Any]] = None
+    discovered_schema: Optional[Dict[str, Any]] = None

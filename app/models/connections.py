@@ -7,14 +7,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
-from app.models.base import Base, AuditMixin, SoftDeleteMixin
+from app.models.base import Base, AuditMixin, SoftDeleteMixin, OwnerMixin
 from app.models.enums import ConnectorType
 
 if TYPE_CHECKING:
     from app.models.pipelines import Pipeline  # Avoid circular import
     from app.models.execution import Watermark
 
-class Connection(Base, AuditMixin, SoftDeleteMixin):
+class Connection(Base, AuditMixin, SoftDeleteMixin, OwnerMixin):
     __tablename__ = "connections"
 
     id: Mapped[int] = mapped_column(primary_key=True)

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Union
 import hashlib
 import bcrypt
+import secrets
 from jose import jwt
 from app.core.config import settings
 
@@ -16,6 +17,19 @@ def create_access_token(subject: Union[str, Any], expires_delta: timedelta = Non
     to_encode = {"sub": str(subject), "exp": expire}
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+def get_api_key_hash(api_key: str) -> str:
+    """
+    Hash an API key using SHA256.
+    Fast and secure enough for high-entropy random keys.
+    """
+    return hashlib.sha256(api_key.encode('utf-8')).hexdigest()
+
+def verify_api_key_hash(plain_api_key: str, hashed_api_key: str) -> bool:
+    """
+    Verify an API key hash using constant-time comparison.
+    """
+    return secrets.compare_digest(get_api_key_hash(plain_api_key), hashed_api_key)
 
 def _prepare_password(password: str) -> bytes:
     """

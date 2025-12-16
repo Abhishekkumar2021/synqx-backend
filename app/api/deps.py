@@ -1,22 +1,26 @@
 from typing import Generator, Optional
-from fastapi import Depends, HTTPException, status, Header
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, status, Header, Security
+from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
 from pydantic import ValidationError
+from datetime import datetime, timezone
 
 from app.db.session import SessionLocal
 from app.core.logging import get_logger
 from app.core.config import settings
 from app.core import security
 from app.models.user import User
+from app.models.api_keys import ApiKey
 from app.schemas.auth import TokenPayload
 
 logger = get_logger(__name__)
 
 reusable_oauth2 = OAuth2PasswordBearer(
-    tokenUrl=f"{settings.API_V1_STR}/auth/login"
+    tokenUrl=f"{settings.API_V1_STR}/auth/login",
+    auto_error=False 
 )
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 def get_db() -> Generator[Session, None, None]:
     """
@@ -31,8 +35,47 @@ def get_db() -> Generator[Session, None, None]:
 
 def get_current_user(
     db: Session = Depends(get_db),
-    token: str = Depends(reusable_oauth2)
+    token: Optional[str] = Depends(reusable_oauth2),
+    api_key: Optional[str] = Security(api_key_header)
 ) -> User:
+    
+    # 1. Try API Key first
+    if api_key:
+        hashed_key = security.get_api_key_hash(api_key)
+        # Find key in DB (this could be optimized with caching)
+        stored_key = db.query(ApiKey).filter(ApiKey.hashed_key == hashed_key).first()
+        
+        if stored_key:
+            if not stored_key.is_active:
+                 raise HTTPException(status_code=403, detail="API key is inactive")
+            
+            if stored_key.expires_at and stored_key.expires_at < datetime.now(timezone.utc):
+                 raise HTTPException(status_code=403, detail="API key has expired")
+            
+            # Update last used
+            stored_key.last_used_at = datetime.now(timezone.utc)
+            db.commit()
+            
+            # Get associated user
+            user = db.query(User).filter(User.id == stored_key.user_id).first()
+            if not user:
+                 raise HTTPException(status_code=404, detail="User associated with API key not found")
+            if not user.is_active:
+                 raise HTTPException(status_code=400, detail="Inactive user")
+            return user
+        else:
+             # If API key is provided but invalid, we might want to fail fast or fall through.
+             # Security-wise, if they tried an API key, reject if invalid.
+             raise HTTPException(status_code=403, detail="Invalid API Key")
+
+    # 2. Fallback to Bearer Token
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[security.ALGORITHM]

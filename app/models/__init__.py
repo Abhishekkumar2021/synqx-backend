@@ -4,7 +4,8 @@ from app.models.base import (
     TimestampMixin, 
     UserTrackingMixin, 
     AuditMixin, 
-    SoftDeleteMixin
+    SoftDeleteMixin,
+    OwnerMixin
 )
 
 from app.models.enums import (
@@ -27,6 +28,7 @@ from app.models.pipelines import Pipeline, PipelineVersion, PipelineNode, Pipeli
 from app.models.execution import Job, PipelineRun, StepRun, PipelineRunContext, Watermark
 from app.models.monitoring import SchedulerEvent, JobLog, StepLog, AlertConfig, Alert
 from app.models.user import User
+from app.models.api_keys import ApiKey
 
 # Export all models for Alembic and easy access
 __all__ = [
@@ -35,6 +37,7 @@ __all__ = [
     "UserTrackingMixin",
     "AuditMixin",
     "SoftDeleteMixin",
+    "OwnerMixin",
     
     # Enums
     "ConnectorType",
@@ -69,4 +72,5 @@ __all__ = [
     "StepLog",
     "AlertConfig",
     "Alert",
+    "ApiKey",
 ]

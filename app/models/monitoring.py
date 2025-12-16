@@ -7,7 +7,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
-from app.models.base import Base, AuditMixin, SoftDeleteMixin
+from app.models.base import Base, AuditMixin, SoftDeleteMixin, OwnerMixin
 from app.models.enums import (
     AlertType, AlertDeliveryMethod, AlertLevel, AlertStatus
 )
@@ -94,7 +94,7 @@ class StepLog(Base, AuditMixin):
         return f"<StepLog(step_run_id={self.step_run_id}, level='{self.level}')>"
 
 
-class AlertConfig(Base, AuditMixin, SoftDeleteMixin):
+class AlertConfig(Base, AuditMixin, SoftDeleteMixin, OwnerMixin):
     """Alert configuration and rules"""
     __tablename__ = "alert_configs"
 

@@ -2,6 +2,8 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from sqlalchemy.orm import Session
 
+from app import models
+from app.api import deps
 from app.schemas.pipeline import (
     PipelineCreate,
     PipelineRead,
@@ -19,7 +21,6 @@ from app.schemas.pipeline import (
     PipelineStatsResponse,
 )
 from app.services.pipeline_service import PipelineService
-from app.api.deps import get_db
 from app.core.errors import AppError, ConfigurationError
 from app.core.logging import get_logger
 from app.models.enums import PipelineStatus
@@ -40,17 +41,20 @@ def create_pipeline(
     validate_dag: bool = Query(
         True, description="Validate DAG structure before creation"
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = PipelineService(db)
-        pipeline = service.create_pipeline(pipeline_create, validate_dag=validate_dag)
+        pipeline = service.create_pipeline(
+            pipeline_create, validate_dag=validate_dag, user_id=current_user.id
+        )
 
         response = PipelineDetailRead.model_validate(pipeline)
 
         if pipeline.published_version_id:
             version_detail = service.get_pipeline_version(
-                pipeline.id, pipeline.published_version_id
+                pipeline.id, pipeline.published_version_id, user_id=current_user.id
             )
             if version_detail:
                 response.published_version = PipelineVersionRead.model_validate(
@@ -94,12 +98,13 @@ def list_pipelines(
     ),
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of results"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = PipelineService(db)
         pipelines, total = service.list_pipelines(
-            status=status_filter, limit=limit, offset=offset
+            status=status_filter, limit=limit, offset=offset, user_id=current_user.id
         )
 
         return PipelineListResponse(
@@ -128,10 +133,11 @@ def list_pipelines(
 )
 def get_pipeline(
     pipeline_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     service = PipelineService(db)
-    pipeline = service.get_pipeline(pipeline_id)
+    pipeline = service.get_pipeline(pipeline_id, user_id=current_user.id)
 
     if not pipeline:
         raise HTTPException(
@@ -146,7 +152,7 @@ def get_pipeline(
 
     if pipeline.published_version_id:
         version_detail = service.get_pipeline_version(
-            pipeline.id, pipeline.published_version_id
+            pipeline.id, pipeline.published_version_id, user_id=current_user.id
         )
         if version_detail:
             response.published_version = PipelineVersionRead.model_validate(
@@ -179,15 +185,21 @@ def get_pipeline(
 def update_pipeline(
     pipeline_id: int,
     pipeline_update: PipelineUpdate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = PipelineService(db)
-        pipeline = service.update_pipeline(pipeline_id, pipeline_update)
+        pipeline = service.update_pipeline(pipeline_id, pipeline_update, user_id=current_user.id)
         return PipelineRead.model_validate(pipeline)
 
     except AppError as e:
         logger.error(f"Error updating pipeline {pipeline_id}: {e}")
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -214,15 +226,21 @@ def update_pipeline(
 def delete_pipeline(
     pipeline_id: int,
     hard_delete: bool = Query(False, description="Permanently delete from database"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = PipelineService(db)
-        service.delete_pipeline(pipeline_id, hard_delete=hard_delete)
+        service.delete_pipeline(pipeline_id, hard_delete=hard_delete, user_id=current_user.id)
         return None
 
     except AppError as e:
         logger.error(f"Error deleting pipeline {pipeline_id}: {e}")
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -249,7 +267,8 @@ def delete_pipeline(
 def trigger_pipeline_run(
     pipeline_id: int,
     trigger_request: PipelineTriggerRequest = Body(...),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = PipelineService(db)
@@ -258,6 +277,7 @@ def trigger_pipeline_run(
             version_id=trigger_request.version_id,
             async_execution=trigger_request.async_execution,
             run_params=trigger_request.run_params,
+            user_id=current_user.id,
         )
 
         return PipelineTriggerResponse(
@@ -271,6 +291,11 @@ def trigger_pipeline_run(
 
     except AppError as e:
         logger.error(f"Error triggering pipeline {pipeline_id}: {e}")
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -298,11 +323,12 @@ def trigger_pipeline_run(
 def create_pipeline_version(
     pipeline_id: int,
     version_create: PipelineVersionCreate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = PipelineService(db)
-        version = service.create_pipeline_version(pipeline_id, version_create)
+        version = service.create_pipeline_version(pipeline_id, version_create, user_id=current_user.id)
         return PipelineVersionRead.model_validate(version)
 
     except ConfigurationError as e:
@@ -313,6 +339,11 @@ def create_pipeline_version(
         )
     except AppError as e:
         logger.error(f"Error creating version for pipeline {pipeline_id}: {e}")
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -336,10 +367,11 @@ def create_pipeline_version(
 )
 def list_pipeline_versions(
     pipeline_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     service = PipelineService(db)
-    pipeline = service.get_pipeline(pipeline_id)
+    pipeline = service.get_pipeline(pipeline_id, user_id=current_user.id)
 
     if not pipeline:
         raise HTTPException(
@@ -376,10 +408,11 @@ def list_pipeline_versions(
 def get_pipeline_version(
     pipeline_id: int,
     version_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     service = PipelineService(db)
-    version = service.get_pipeline_version(pipeline_id, version_id)
+    version = service.get_pipeline_version(pipeline_id, version_id, user_id=current_user.id)
 
     if not version:
         raise HTTPException(
@@ -403,11 +436,12 @@ def publish_pipeline_version(
     pipeline_id: int,
     version_id: int,
     publish_request: PipelinePublishRequest = Body(...),
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = PipelineService(db)
-        version = service.publish_version(pipeline_id, version_id)
+        version = service.publish_version(pipeline_id, version_id, user_id=current_user.id)
 
         return PipelinePublishResponse(
             message=f"Version {version.version} published successfully",
@@ -420,6 +454,11 @@ def publish_pipeline_version(
         logger.error(
             f"Error publishing version {version_id} for pipeline {pipeline_id}: {e}"
         )
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": str(e)},
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Bad request", "message": str(e)},
@@ -443,11 +482,12 @@ def publish_pipeline_version(
 )
 def validate_pipeline(
     pipeline_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         service = PipelineService(db)
-        pipeline = service.get_pipeline(pipeline_id)
+        pipeline = service.get_pipeline(pipeline_id, user_id=current_user.id)
 
         if not pipeline:
             raise HTTPException(
@@ -458,7 +498,7 @@ def validate_pipeline(
                 },
             )
 
-        version = service.get_pipeline_version(pipeline_id, None)
+        version = service.get_pipeline_version(pipeline_id, None, user_id=current_user.id)
 
         if not version:
             return PipelineValidationResponse(
@@ -506,7 +546,8 @@ def validate_pipeline(
 )
 def get_pipeline_stats(
     pipeline_id: int,
-    db: Session = Depends(get_db),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
         from sqlalchemy import func
@@ -514,7 +555,7 @@ def get_pipeline_stats(
         from app.models.enums import JobStatus
 
         service = PipelineService(db)
-        pipeline = service.get_pipeline(pipeline_id)
+        pipeline = service.get_pipeline(pipeline_id, user_id=current_user.id)
 
         if not pipeline:
             raise HTTPException(
@@ -525,6 +566,8 @@ def get_pipeline_stats(
                 },
             )
 
+        # Assuming jobs are not strictly user-scoped beyond pipeline scope, 
+        # but we found the pipeline via user_id, so it is safe.
         total_runs = (
             db.query(func.count(Job.id)).filter(Job.pipeline_id == pipeline_id).scalar()
             or 0

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import DateTime, String
+from sqlalchemy import DateTime, String, ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.ext.hybrid import hybrid_property
 
@@ -33,6 +33,14 @@ class UserTrackingMixin:
 class AuditMixin(TimestampMixin, UserTrackingMixin):
     """Complete audit trail mixin"""
     pass
+
+class OwnerMixin:
+    """Ownership mixin to scope resources to a user"""
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), 
+        nullable=False, 
+        index=True
+    )
 
 class SoftDeleteMixin:
     """Soft delete capability"""
