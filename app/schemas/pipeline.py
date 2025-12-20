@@ -70,12 +70,50 @@ class PipelineEdgeCreate(PipelineEdgeBase):
 class PipelineEdgeRead(PipelineEdgeBase):
     id: int
     pipeline_version_id: int
-    from_node_id: int
-    to_node_id: int
+    from_node_id: str
+    to_node_id: str
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("from_node_id", "to_node_id", mode="before")
+    @classmethod
+    def convert_node_id_to_str(cls, v: Any, info: Any) -> str:
+        # If we have the integer ID but need the string node_id, we need to access the relationship.
+        # When loaded from ORM, 'v' is the integer foreign key.
+        # But we can't easily access the sibling relationship attribute (e.g. from_node) from here 
+        # because 'v' is just the value.
+        # However, Pydantic's 'from_attributes' (ORM mode) usually maps attributes by name.
+        # Since the model has 'from_node_id' (int) and 'from_node' (object),
+        # we can't map 'from_node_id' directly to the string if the source is an int.
+        
+        # Strategy: We assume the object being validated is the ORM PipelineEdge object.
+        # We can use a model_validator (root validator) to extract the string IDs from the relationships.
+        return str(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_node_ids(cls, data: Any) -> Any:
+        # This handles the ORM object case
+        if hasattr(data, "from_node") and data.from_node:
+            # We construct a dict or modify if it's a dict, but 'data' is the ORM object.
+            # We can return a dict with the values we want.
+            # But converting the whole ORM object to dict is expensive/complex here.
+            # Easier way: The Pydantic model fields are 'from_node_id' and 'to_node_id'.
+            # We want these to be populated with 'from_node.node_id' and 'to_node.node_id'.
+            
+            # We can create a proxy or dict.
+            return {
+                "id": data.id,
+                "pipeline_version_id": data.pipeline_version_id,
+                "from_node_id": data.from_node.node_id,
+                "to_node_id": data.to_node.node_id,
+                "edge_type": data.edge_type,
+                "created_at": data.created_at,
+                "updated_at": data.updated_at
+            }
+        return data
 
 
 class PipelineVersionBase(BaseModel):

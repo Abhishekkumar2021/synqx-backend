@@ -89,9 +89,10 @@ class PipelineVersion(Base, AuditMixin):
         back_populates="version",
         cascade="all, delete-orphan",
         order_by="PipelineNode.order_index",
+        lazy="selectin",
     )
     edges: Mapped[list["PipelineEdge"]] = relationship(
-        back_populates="version", cascade="all, delete-orphan"
+        back_populates="version", cascade="all, delete-orphan", lazy="selectin"
     )
 
     __table_args__ = (
@@ -168,8 +169,8 @@ class PipelineEdge(Base, AuditMixin):
     edge_type: Mapped[str] = mapped_column(String(50), default="data_flow", nullable=False)
 
     version: Mapped["PipelineVersion"] = relationship(back_populates="edges")
-    from_node: Mapped["PipelineNode"] = relationship(foreign_keys=[from_node_id], back_populates="outgoing_edges")
-    to_node: Mapped["PipelineNode"] = relationship(foreign_keys=[to_node_id], back_populates="incoming_edges")
+    from_node: Mapped["PipelineNode"] = relationship(foreign_keys=[from_node_id], back_populates="outgoing_edges", lazy="selectin")
+    to_node: Mapped["PipelineNode"] = relationship(foreign_keys=[to_node_id], back_populates="incoming_edges", lazy="selectin")
 
     __table_args__ = (
         UniqueConstraint("pipeline_version_id", "from_node_id", "to_node_id", name="uq_edge_unique"),
