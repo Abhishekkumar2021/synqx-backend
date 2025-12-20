@@ -189,7 +189,7 @@ def delete_connection(
     hard_delete: bool = Query(False, description="Permanently delete from database"),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
-):
+) -> None:
     try:
         service = ConnectionService(db)
         service.delete_connection(connection_id, hard_delete=hard_delete, user_id=current_user.id)
@@ -509,7 +509,7 @@ def delete_asset(
     hard_delete: bool = Query(False, description="Permanently delete from database"),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
-):
+) -> None:
     try:
         service = ConnectionService(db)
         asset = service.get_asset(asset_id, user_id=current_user.id)

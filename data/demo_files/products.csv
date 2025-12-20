@@ -1,0 +1,4 @@
+id,product,price,in_stock,category
+1,Widget A,$10.50,True,Gadget
+2,Widget B,$20.00,False,Gadget
+3,Widget C,$15.75,True,Gadget

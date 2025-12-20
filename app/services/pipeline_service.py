@@ -419,13 +419,16 @@ class PipelineService:
                 self.db_session.commit()
                 
                 self.pipeline_runner.run(
-                    pipeline_version, db_session=self.db_session, job_id=job.id
+                    pipeline_version, db=self.db_session, job_id=job.id
                 )
                 
                 job.status = JobStatus.SUCCESS
                 job.completed_at = datetime.now(timezone.utc)
-                if job.started_at:
-                    duration_ms = int((job.completed_at - job.started_at).total_seconds() * 1000)
+                if job.started_at and job.completed_at:
+                    # Ensure datetimes are timezone-aware before subtraction
+                    started_at_aware = job.started_at.replace(tzinfo=timezone.utc) if job.started_at.tzinfo is None else job.started_at
+                    completed_at_aware = job.completed_at.replace(tzinfo=timezone.utc) if job.completed_at.tzinfo is None else job.completed_at
+                    duration_ms = int((completed_at_aware - started_at_aware).total_seconds() * 1000)
                     job.execution_time_ms = duration_ms
                 self.db_session.commit()
                 
@@ -450,13 +453,15 @@ class PipelineService:
             self.db_session.rollback()
             
             failed_job = self.db_session.query(Job).filter(Job.id == job.id).first()
-            if failed_job:
+            if failed_job and failed_job.started_at and failed_job.completed_at: # Add check for completed_at too
                 failed_job.status = JobStatus.FAILED
                 failed_job.completed_at = datetime.now(timezone.utc)
                 failed_job.infra_error = str(e)
-                if failed_job.started_at:
-                    duration_ms = int((failed_job.completed_at - failed_job.started_at).total_seconds() * 1000)
-                    failed_job.execution_time_ms = duration_ms
+                # Ensure datetimes are timezone-aware before subtraction
+                started_at_aware = failed_job.started_at.replace(tzinfo=timezone.utc) if failed_job.started_at.tzinfo is None else failed_job.started_at
+                completed_at_aware = failed_job.completed_at.replace(tzinfo=timezone.utc) if failed_job.completed_at.tzinfo is None else failed_job.completed_at
+                duration_ms = int((completed_at_aware - started_at_aware).total_seconds() * 1000)
+                failed_job.execution_time_ms = duration_ms
                 self.db_session.commit()
             
             raise AppError(f"Failed to trigger pipeline run: {e}") from e

@@ -109,6 +109,7 @@ class AssetBase(BaseModel):
     is_destination: bool = False
     is_incremental_capable: bool = False
     description: Optional[str] = Field(None, max_length=5000)
+    config: Optional[Dict[str, Any]] = None
     tags: Dict[str, Any] = Field(default_factory=dict)
     row_count_estimate: Optional[int] = Field(None, ge=0)
     size_bytes_estimate: Optional[int] = Field(None, ge=0)
@@ -134,6 +135,7 @@ class AssetUpdate(BaseModel):
     is_destination: Optional[bool] = None
     is_incremental_capable: Optional[bool] = None
     description: Optional[str] = Field(None, max_length=5000)
+    config: Optional[Dict[str, Any]] = None
     tags: Optional[Dict[str, Any]] = None
     schema_metadata: Optional[Dict[str, Any]] = None
 

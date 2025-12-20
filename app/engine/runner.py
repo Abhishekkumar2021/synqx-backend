@@ -8,6 +8,7 @@ from app.engine.dag import DAG, DagCycleError
 from app.connectors.factory import ConnectorFactory
 import app.connectors.impl
 from app.engine.transforms.factory import TransformFactory
+import app.engine.transforms.impl
 from app.core.errors import AppError, ConfigurationError
 from app.models.pipelines import PipelineVersion, PipelineNode
 from app.models.connections import Asset, Connection

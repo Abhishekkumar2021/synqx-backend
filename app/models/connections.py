@@ -61,6 +61,7 @@ class Asset(Base, AuditMixin, SoftDeleteMixin):
     is_destination: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_incremental_capable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    config: Mapped[Optional[dict]] = mapped_column(JSON) # Add this line for asset-specific configuration
     schema_metadata: Mapped[Optional[dict]] = mapped_column(JSON)
     current_schema_version: Mapped[Optional[int]] = mapped_column(Integer)
 

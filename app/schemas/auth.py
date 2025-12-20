@@ -43,6 +43,11 @@ class UserCreate(BaseModel):
         """Ensure email is lowercase."""
         return v.lower()
 
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = Field(None, max_length=255)
+    password: Optional[str] = Field(None, min_length=8, max_length=128)
+    email: Optional[EmailStr] = None
+
 class UserRead(BaseModel):
     id: int
     email: EmailStr

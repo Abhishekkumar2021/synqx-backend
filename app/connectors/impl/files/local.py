@@ -192,7 +192,9 @@ class LocalFileConnector(BaseConnector):
 
     def _schema_from_sample(self, asset: str, sample_size: int) -> Dict[str, Any]:
         try:
-            df = self.sample(asset, limit=sample_size)
+            # Use read_batch to get the first chunk as sample
+            df_iter = self.read_batch(asset, limit=sample_size)
+            df = next(df_iter)
             return {
                 "asset": asset,
                 "columns": [

@@ -1,0 +1,21 @@
+from typing import Any
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from app import models
+from app.api import deps
+from app.schemas.dashboard import DashboardStats
+from app.services.dashboard_service import DashboardService
+
+router = APIRouter()
+
+@router.get("/stats", response_model=DashboardStats)
+def get_dashboard_stats(
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Get aggregated dashboard statistics.
+    """
+    service = DashboardService(db)
+    return service.get_stats(user_id=current_user.id)

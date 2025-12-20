@@ -228,7 +228,7 @@ def delete_pipeline(
     hard_delete: bool = Query(False, description="Permanently delete from database"),
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
-):
+) -> None:
     try:
         service = PipelineService(db)
         service.delete_pipeline(pipeline_id, hard_delete=hard_delete, user_id=current_user.id)

@@ -9,7 +9,7 @@ from app.core import security
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.user import User
-from app.schemas.auth import Token, UserCreate, UserRead, UserLogin
+from app.schemas.auth import Token, UserCreate, UserRead, UserLogin, UserUpdate
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -107,3 +107,46 @@ def read_users_me(
     Get current user.
     """
     return current_user
+
+@router.patch("/me", response_model=UserRead)
+def update_users_me(
+    *,
+    db: Session = Depends(deps.get_db),
+    user_in: UserUpdate,
+    current_user: User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Update current user.
+    """
+    if user_in.email and user_in.email != current_user.email:
+        existing_user = db.query(User).filter(User.email == user_in.email).first()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A user with this email already exists",
+            )
+        current_user.email = user_in.email
+    
+    if user_in.full_name is not None:
+        current_user.full_name = user_in.full_name
+        
+    if user_in.password:
+        current_user.hashed_password = security.get_password_hash(user_in.password)
+        
+    db.add(current_user)
+    db.commit()
+    db.refresh(current_user)
+    return current_user
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+def delete_users_me(
+    *,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user),
+) -> None:
+    """
+    Delete current user.
+    """
+    db.delete(current_user)
+    db.commit()
+    return None
