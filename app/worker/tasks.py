@@ -320,6 +320,9 @@ def _mark_job_failed(
     session, job: Job, error_message: str, is_infra_error: bool = False
 ) -> None:
     """Mark a job as failed and log the error."""
+    from app.models.monitoring import Alert, AlertConfig
+    from app.models.pipelines import Pipeline
+
     job.status = JobStatus.FAILED
     job.completed_at = datetime.now(timezone.utc)
 
@@ -329,9 +332,36 @@ def _mark_job_failed(
     if is_infra_error:
         job.infra_error = error_message
     else:
-        job.error_message = error_message
+        # Check if job has error_message attribute (it's actually infra_error in the model, 
+        # or we might want to log it in logs)
+        job.infra_error = f"Execution Error: {error_message}"
 
     session.commit()
+
+    # Trigger Alerts based on Config
+    try:
+        pipeline = session.query(Pipeline).filter(Pipeline.id == job.pipeline_id).first()
+        if pipeline:
+            configs = session.query(AlertConfig).filter(
+                AlertConfig.owner_id == pipeline.owner_id,
+                AlertConfig.enabled == True,
+                AlertConfig.alert_type == "JOB_FAILURE"
+            ).all()
+
+            for config in configs:
+                alert = Alert(
+                    alert_config_id=config.id,
+                    pipeline_id=job.pipeline_id,
+                    job_id=job.id,
+                    severity="ERROR",
+                    title=f"Pipeline {pipeline.name} Failed",
+                    message=error_message,
+                    status="NEW"
+                )
+                session.add(alert)
+            session.commit()
+    except Exception as alert_err:
+        logger.error(f"Failed to create alerts: {alert_err}")
 
     DBLogger.log_job(
         session, job.id, "ERROR", f"Job failed: {error_message}", source="worker"

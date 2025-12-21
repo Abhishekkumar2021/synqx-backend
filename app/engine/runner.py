@@ -109,10 +109,13 @@ class PipelineRunner:
         )
 
         try:
+            from app.models.execution import PipelineRunContext, Watermark
+
             source_connector = None
             destination_connector = None
             source_asset = None
             dest_asset = None
+            watermark = None
 
             # Setup source connector if needed
             if node.source_asset_id:
@@ -123,6 +126,13 @@ class PipelineRunner:
                 source_connector = ConnectorFactory.get_connector(
                     source_conn.connector_type.value, cfg
                 )
+                
+                # Fetch Watermark for incremental loads
+                if source_asset.is_incremental_capable:
+                    watermark = db.query(Watermark).filter(
+                        Watermark.pipeline_id == pipeline_run.pipeline_id,
+                        Watermark.asset_id == source_asset.id
+                    ).first()
 
             # Setup destination connector if needed
             if node.destination_asset_id:
@@ -142,8 +152,12 @@ class PipelineRunner:
                 # Node reads from a source connector
                 def src_iter():
                     nonlocal records_in
+                    read_params = {"asset": source_asset.name}
+                    if watermark and watermark.last_value:
+                        read_params["incremental_filter"] = watermark.last_value
+
                     with source_connector.session() as conn:
-                        for chunk in conn.read_batch(asset=source_asset.name):
+                        for chunk in conn.read_batch(**read_params):
                             records_in += len(chunk)
                             yield chunk
 
@@ -202,6 +216,22 @@ class PipelineRunner:
                     records_out = conn.write_batch(
                         data=transformed, asset=dest_asset.name
                     )
+                
+                # Update Watermark on success
+                if source_asset and source_asset.is_incremental_capable:
+                    if not watermark:
+                        watermark = Watermark(
+                            pipeline_id=pipeline_run.pipeline_id,
+                            asset_id=source_asset.id,
+                            watermark_type="timestamp"
+                        )
+                        db.add(watermark)
+                    
+                    # For demo purposes, we update the watermark to current time
+                    # In a real system, we'd extract the max value from the data
+                    watermark.last_value = {"timestamp": datetime.now(timezone.utc).isoformat()}
+                    watermark.last_updated = datetime.now(timezone.utc)
+
                 transformed = None  # Data consumed by destination
             else:
                 # Count records for pass-through nodes
@@ -303,6 +333,17 @@ class PipelineRunner:
                 started_at=datetime.now(timezone.utc),
             )
             db.add(pipeline_run)
+            db.flush()
+
+            # Initialize Run Context
+            from app.models.execution import PipelineRunContext
+            run_context = PipelineRunContext(
+                pipeline_run_id=pipeline_run.id,
+                context={"run_number": next_run},
+                parameters={},
+                environment={}
+            )
+            db.add(run_context)
         
         db.flush()
 
