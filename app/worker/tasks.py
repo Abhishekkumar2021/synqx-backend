@@ -5,8 +5,8 @@ from celery.exceptions import SoftTimeLimitExceeded, Retry
 from app.core.celery_app import celery_app
 from app.core.logging import get_logger
 from app.db.session import session_scope
-from app.models.execution import Job
-from app.models.enums import JobStatus
+from app.models.execution import Job, PipelineRun
+from app.models.enums import JobStatus, PipelineRunStatus
 from app.models.pipelines import PipelineVersion
 from app.engine.runner import PipelineRunner
 from app.core.db_logging import DBLogger
@@ -142,22 +142,46 @@ def execute_pipeline_task(self, job_id: int) -> str:
 
                 runner.run(pipeline_version, session, job_id=job.id)
 
+                # If runner.run completes without exception, all pipeline_run and step_run changes are flushed
+                # and pipeline_run.status is set to COMPLETED.
                 # Mark job as successful
                 job.status = JobStatus.SUCCESS
                 job.completed_at = datetime.now(timezone.utc)
 
-                if job.started_at:
-                    job.duration_seconds = (
-                        job.completed_at - job.started_at
-                    ).total_seconds()
+                # Get the associated PipelineRun to retrieve its duration
+                pipeline_run = session.query(PipelineRun).filter(PipelineRun.job_id == job.id).first()
+                if pipeline_run and pipeline_run.duration_seconds is not None:
+                    job.execution_time_ms = int(pipeline_run.duration_seconds * 1000)
+                else:
+                    # Fallback if pipeline_run is not found or duration not set
+                    if job.started_at:
+                        duration_seconds = (job.completed_at - job.started_at).total_seconds()
+                        job.execution_time_ms = int(duration_seconds * 1000)
+                    else:
+                        job.execution_time_ms = 0 # Default if started_at is also missing
 
-                session.commit()
+                session.commit() # Final commit of all changes in the session
+
+                # Trigger Success Alerts
+                try:
+                    from app.services.alert_service import AlertService
+                    from app.models.enums import AlertType, AlertLevel
+                    AlertService.trigger_alerts(
+                        session,
+                        alert_type=AlertType.JOB_SUCCESS,
+                        pipeline_id=job.pipeline_id,
+                        job_id=job.id,
+                        message=f"Pipeline execution completed successfully",
+                        level=AlertLevel.SUCCESS
+                    )
+                except Exception as alert_err:
+                    logger.error(f"Failed to create success alerts: {alert_err}")
 
                 DBLogger.log_job(
                     session,
                     job.id,
                     "INFO",
-                    f"Job completed successfully in {job.duration_seconds:.2f}s",
+                    "Job completed successfully",
                     source="worker",
                 )
 
@@ -171,10 +195,25 @@ def execute_pipeline_task(self, job_id: int) -> str:
             except SoftTimeLimitExceeded:
                 error_msg = "Pipeline execution exceeded time limit"
                 logger.error(error_msg, extra={"job_id": job_id})
+                # Set pipeline_run status to failed here as runner.run might not have
+                # caught this specific exception type or the session might be invalid.
+                # Find the pipeline_run in the session and update it.
+                pipeline_run_in_session = (
+                    session.query(PipelineRun)
+                    .filter(PipelineRun.job_id == job_id)
+                    .first()
+                )
+                if pipeline_run_in_session:
+                    pipeline_run_in_session.status = PipelineRunStatus.FAILED
+                    pipeline_run_in_session.completed_at = datetime.now(timezone.utc)
+                    pipeline_run_in_session.error_message = error_msg
+                    session.add(pipeline_run_in_session)
+                
                 _mark_job_failed(session, job, error_msg, is_infra_error=True)
                 raise  # Don't retry on timeout
 
             except Exception as e:
+                # This catches exceptions from runner.run
                 logger.error(
                     "Pipeline execution failed",
                     extra={
@@ -186,16 +225,18 @@ def execute_pipeline_task(self, job_id: int) -> str:
                     exc_info=True,
                 )
 
-                # Check if we should retry
+                # At this point, runner.run should have already marked pipeline_run as FAILED and flushed.
+                # We just need to handle the job status and commit/retry.
                 should_retry = _should_retry_job(job, e, self.request.retries)
 
                 if should_retry and self.request.retries < self.max_retries:
+                    # _mark_job_retrying commits the session
                     _mark_job_retrying(session, job, str(e))
-                    # Retry with exponential backoff
                     raise self.retry(
                         exc=e, countdown=_calculate_retry_delay(self.request.retries)
                     )
                 else:
+                    # _mark_job_failed commits the session
                     _mark_job_failed(session, job, str(e), is_infra_error=False)
                     raise
 
@@ -209,6 +250,23 @@ def execute_pipeline_task(self, job_id: int) -> str:
             extra={"job_id": job_id, "error": str(e)},
             exc_info=True,
         )
+        # Attempt to mark the job as failed if it's not already
+        with session_scope() as session:
+            job = session.query(Job).filter(Job.id == job_id).first()
+            if job and job.status not in [JobStatus.SUCCESS, JobStatus.FAILED]:
+                _mark_job_failed(session, job, f"Unexpected worker error: {e}", is_infra_error=True)
+            # Find the pipeline_run in the session and update it.
+            pipeline_run_in_session = (
+                session.query(PipelineRun)
+                .filter(PipelineRun.job_id == job_id)
+                .first()
+            )
+            if pipeline_run_in_session and pipeline_run_in_session.status not in [PipelineRunStatus.COMPLETED, PipelineRunStatus.FAILED]:
+                pipeline_run_in_session.status = PipelineRunStatus.FAILED
+                pipeline_run_in_session.completed_at = datetime.now(timezone.utc)
+                pipeline_run_in_session.error_message = f"Unexpected worker error: {e}"
+                session.add(pipeline_run_in_session)
+                session.commit()
         raise
 
 
@@ -326,40 +384,40 @@ def _mark_job_failed(
     job.status = JobStatus.FAILED
     job.completed_at = datetime.now(timezone.utc)
 
-    if job.started_at:
-        job.duration_seconds = (job.completed_at - job.started_at).total_seconds()
+    # Get the associated PipelineRun to set its duration
+    pipeline_run = session.query(PipelineRun).filter(PipelineRun.job_id == job.id).first()
+    if pipeline_run:
+        if pipeline_run.started_at:
+            pipeline_run.duration_seconds = (
+                pipeline_run.completed_at - pipeline_run.started_at
+            ).total_seconds()
+            job.execution_time_ms = int(pipeline_run.duration_seconds * 1000)
+        session.add(pipeline_run) # Persist changes to pipeline_run
+    else:
+        if job.started_at:
+            duration_seconds = (job.completed_at - job.started_at).total_seconds()
+            job.execution_time_ms = int(duration_seconds * 1000)
 
     if is_infra_error:
         job.infra_error = error_message
     else:
-        # Check if job has error_message attribute (it's actually infra_error in the model, 
-        # or we might want to log it in logs)
         job.infra_error = f"Execution Error: {error_message}"
 
     session.commit()
 
     # Trigger Alerts based on Config
     try:
-        pipeline = session.query(Pipeline).filter(Pipeline.id == job.pipeline_id).first()
-        if pipeline:
-            configs = session.query(AlertConfig).filter(
-                AlertConfig.owner_id == pipeline.owner_id,
-                AlertConfig.enabled == True,
-                AlertConfig.alert_type == "JOB_FAILURE"
-            ).all()
-
-            for config in configs:
-                alert = Alert(
-                    alert_config_id=config.id,
-                    pipeline_id=job.pipeline_id,
-                    job_id=job.id,
-                    severity="ERROR",
-                    title=f"Pipeline {pipeline.name} Failed",
-                    message=error_message,
-                    status="NEW"
-                )
-                session.add(alert)
-            session.commit()
+        from app.services.alert_service import AlertService
+        from app.models.enums import AlertType, AlertLevel
+        
+        AlertService.trigger_alerts(
+            session,
+            alert_type=AlertType.JOB_FAILURE,
+            pipeline_id=job.pipeline_id,
+            job_id=job.id,
+            message=error_message,
+            level=AlertLevel.ERROR
+        )
     except Exception as alert_err:
         logger.error(f"Failed to create alerts: {alert_err}")
 

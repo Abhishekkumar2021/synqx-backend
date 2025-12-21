@@ -75,6 +75,23 @@ class BaseConnector(ABC):
     ) -> int:
         pass
 
+    def fetch_sample(
+        self, asset: str, limit: int = 100, **kwargs
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch a sample of rows from the asset for preview purposes.
+        """
+        try:
+            df = next(self.read_batch(asset, limit=limit, **kwargs))
+            # Convert NaN to None for JSON serialization
+            return df.where(pd.notnull(df), None).to_dict(orient="records")
+        except StopIteration:
+            return []
+        except Exception as e:
+            # If read_batch fails, we return an empty list or re-raise if it's a critical error
+            # For sample data, returning empty list is often safer for UI
+            return []
+
     @staticmethod
     def slice_dataframe(df: pd.DataFrame, offset: Optional[int], limit: Optional[int]):
         if offset:

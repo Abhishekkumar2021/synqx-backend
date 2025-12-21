@@ -63,6 +63,7 @@ class ConnectionRead(ConnectionBase):
 
 
 class ConnectionDetailRead(ConnectionRead):
+    config: Optional[Dict[str, Any]] = None
     config_schema: Optional[Dict[str, Any]] = None
     asset_count: int = 0
 
@@ -196,3 +197,21 @@ class SchemaDiscoveryResponse(BaseModel):
     is_breaking_change: bool = False
     message: str
     discovered_schema: Optional[Dict[str, Any]] = None
+
+
+class AssetSampleRead(BaseModel):
+    asset_id: int
+    rows: List[Dict[str, Any]]
+    count: int
+
+
+class ConnectionImpactRead(BaseModel):
+    pipeline_count: int
+
+
+class ConnectionUsageStatsRead(BaseModel):
+    sync_success_rate: float
+    average_latency_ms: Optional[float]
+    data_extracted_gb_24h: Optional[float]
+    last_24h_runs: int
+    last_7d_runs: int

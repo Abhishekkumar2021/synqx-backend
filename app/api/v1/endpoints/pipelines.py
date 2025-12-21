@@ -587,17 +587,24 @@ def get_pipeline_stats(
             or 0
         )
 
-        avg_duration_ms = (
-            db.query(func.avg(Job.execution_time_ms))
-            .filter(
-                Job.pipeline_id == pipeline_id,
-                Job.status == JobStatus.SUCCESS,
-                Job.execution_time_ms.isnot(None),
+        # Calculate average duration with fallback for historical data
+        # Using PostgreSQL specific EXTRACT(EPOCH FROM ...)
+        avg_duration_query = db.query(
+            func.avg(
+                func.coalesce(
+                    Job.execution_time_ms,
+                    func.extract('epoch', Job.completed_at - Job.started_at) * 1000
+                )
             )
-            .scalar()
+        ).filter(
+            Job.pipeline_id == pipeline_id,
+            Job.status == JobStatus.SUCCESS,
+            Job.completed_at.isnot(None),
+            Job.started_at.isnot(None),
         )
-
-        avg_duration_seconds = (avg_duration_ms / 1000.0) if avg_duration_ms else None
+        
+        avg_duration_ms = avg_duration_query.scalar()
+        avg_duration_seconds = (float(avg_duration_ms) / 1000.0) if avg_duration_ms is not None else None
 
         last_run = (
             db.query(Job.completed_at)

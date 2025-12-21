@@ -38,4 +38,14 @@ class ConnectionManager:
             await pubsub.unsubscribe(channel)
             await redis.close()
 
+    async def broadcast(self, channel: str, message: dict):
+        """
+        Publishes a message to a Redis channel.
+        """
+        redis = aioredis.from_url(self.redis_url, decode_responses=True)
+        try:
+            await redis.publish(channel, json.dumps(message))
+        finally:
+            await redis.close()
+
 manager = ConnectionManager()

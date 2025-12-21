@@ -22,8 +22,12 @@ from app.schemas.connection import (
     SchemaDiscoveryRequest,
     SchemaDiscoveryResponse,
     AssetSchemaVersionRead,
+    AssetSampleRead,
+    ConnectionImpactRead,
+    ConnectionUsageStatsRead,
 )
 from app.services.connection_service import ConnectionService
+from app.services.vault_service import VaultService
 from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.models.enums import ConnectorType
@@ -49,9 +53,15 @@ def create_connection(
 ):
     try:
         service = ConnectionService(db)
-        connection = service.create_connection(connection_create, user_id=current_user.id)
+        connection = service.create_connection(
+            connection_create, user_id=current_user.id
+        )
         response = ConnectionDetailRead.model_validate(connection)
         response.asset_count = len(connection.assets) if connection.assets else 0
+        try:
+            response.config = VaultService.decrypt_config(connection.config_encrypted)
+        except Exception:
+            response.config = {"error": "Failed to decrypt configuration"}
         return response
     except AppError as e:
         logger.error(f"Error creating connection: {e}")
@@ -135,6 +145,10 @@ def get_connection(
         )
     response = ConnectionDetailRead.model_validate(connection)
     response.asset_count = len(connection.assets) if connection.assets else 0
+    try:
+        response.config = VaultService.decrypt_config(connection.config_encrypted)
+    except Exception:
+        response.config = {"error": "Failed to decrypt configuration"}
     return response
 
 
@@ -152,7 +166,9 @@ def update_connection(
 ):
     try:
         service = ConnectionService(db)
-        connection = service.update_connection(connection_id, connection_update, user_id=current_user.id)
+        connection = service.update_connection(
+            connection_id, connection_update, user_id=current_user.id
+        )
         return ConnectionRead.model_validate(connection)
     except AppError as e:
         logger.error(f"Error updating connection {connection_id}: {e}")
@@ -192,7 +208,9 @@ def delete_connection(
 ) -> None:
     try:
         service = ConnectionService(db)
-        service.delete_connection(connection_id, hard_delete=hard_delete, user_id=current_user.id)
+        service.delete_connection(
+            connection_id, hard_delete=hard_delete, user_id=current_user.id
+        )
         return None
     except AppError as e:
         logger.error(f"Error deleting connection {connection_id}: {e}")
@@ -302,6 +320,7 @@ def discover_assets(
             },
         )
 
+
 @router.get(
     "/{connection_id}/assets",
     response_model=AssetListResponse,
@@ -375,7 +394,7 @@ def create_asset(
     except AppError as e:
         logger.error(f"Error creating asset: {e}")
         if "not found" in str(e).lower():
-             raise HTTPException(
+            raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": "Not found", "message": str(e)},
             )
@@ -478,7 +497,7 @@ def update_asset(
     except AppError as e:
         logger.error(f"Error updating asset {asset_id}: {e}")
         if "not found" in str(e).lower():
-             raise HTTPException(
+            raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": "Not found", "message": str(e)},
             )
@@ -536,7 +555,7 @@ def delete_asset(
     except AppError as e:
         logger.error(f"Error deleting asset {asset_id}: {e}")
         if "not found" in str(e).lower():
-             raise HTTPException(
+            raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": "Not found", "message": str(e)},
             )
@@ -599,7 +618,7 @@ def discover_schema(
     except AppError as e:
         logger.error(f"Error discovering schema for asset {asset_id}: {e}")
         if "not found" in str(e).lower():
-             raise HTTPException(
+            raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": "Not found", "message": str(e)},
             )
@@ -633,22 +652,126 @@ def list_schema_versions(
     service = ConnectionService(db)
     asset = service.get_asset(asset_id, user_id=current_user.id)
 
-    if not asset:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error": "Not found", "message": f"Asset {asset_id} not found"},
-        )
-
-    if asset.connection_id != connection_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": "Not found",
-                "message": f"Asset {asset_id} not found in connection {connection_id}",
-            },
-        )
-
     if not asset.schema_versions:
         return []
 
     return [AssetSchemaVersionRead.model_validate(v) for v in asset.schema_versions]
+
+
+@router.get(
+    "/{connection_id}/assets/{asset_id}/sample",
+    response_model=AssetSampleRead,
+    summary="Get Asset Sample Data",
+    description="Fetch a sample of rows from the asset",
+)
+def get_asset_sample_data(
+    connection_id: int,
+    asset_id: int,
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        service = ConnectionService(db)
+        asset = service.get_asset(asset_id, user_id=current_user.id)
+
+        if not asset:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": f"Asset {asset_id} not found"},
+            )
+
+        if asset.connection_id != connection_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "Not found",
+                    "message": f"Asset {asset_id} not found in connection {connection_id}",
+                },
+            )
+
+        result = service.get_sample_data(
+            asset_id=asset_id,
+            limit=limit,
+            user_id=current_user.id,
+        )
+        return result
+    except AppError as e:
+        logger.error(f"Error fetching sample for asset {asset_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching sample: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to fetch sample data",
+            },
+        )
+
+
+@router.get(
+    "/{connection_id}/impact",
+    response_model=ConnectionImpactRead,
+    summary="Get Connection Impact",
+    description="Get number of pipelines using this connection",
+)
+def get_connection_impact(
+    connection_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        service = ConnectionService(db)
+        impact = service.get_connection_impact(connection_id, user_id=current_user.id)
+        return impact
+    except AppError as e:
+        logger.error(f"Error fetching connection impact for {connection_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching connection impact: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to fetch connection impact",
+            },
+        )
+
+
+@router.get(
+    "/{connection_id}/usage-stats",
+    response_model=ConnectionUsageStatsRead,
+    summary="Get Connection Usage Stats",
+    description="Get usage statistics for this connection",
+)
+def get_connection_usage_stats(
+    connection_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        service = ConnectionService(db)
+        stats = service.get_connection_usage_stats(connection_id, user_id=current_user.id)
+        return stats
+    except AppError as e:
+        logger.error(f"Error fetching connection usage stats for {connection_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching connection usage stats: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to fetch connection usage stats",
+            },
+        )

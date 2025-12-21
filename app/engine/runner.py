@@ -64,7 +64,15 @@ class PipelineRunner:
     def _materialize_iterator(
         self, data_iter: Iterator[pd.DataFrame]
     ) -> List[pd.DataFrame]:
-        """Materialize an iterator into a list of DataFrames for multi-input operators."""
+        """
+        Materialize an iterator into a list of DataFrames for multi-input operators.
+        WARNING: This loads all data into memory and can lead to OOM errors for large datasets.
+        """
+        logger.warning(
+            "Materializing data into memory for multi-input operator. "
+            "This can lead to OutOfMemory errors for large datasets. "
+            "Consider optimizing pipeline design for large-scale operations."
+        )
         return list(data_iter)
 
     def _execute_node(
@@ -333,19 +341,10 @@ class PipelineRunner:
                 started_at=datetime.now(timezone.utc),
             )
             db.add(pipeline_run)
-            db.flush()
-
-            # Initialize Run Context
-            from app.models.execution import PipelineRunContext
-            run_context = PipelineRunContext(
-                pipeline_run_id=pipeline_run.id,
-                context={"run_number": next_run},
-                parameters={},
-                environment={}
-            )
-            db.add(run_context)
         
-        db.flush()
+        db.flush() # Flush pipeline_run to get its ID, essential for StepRun
+        db.refresh(pipeline_run) # Ensure pipeline_run object is fresh with its ID
+        
 
         DBLogger.log_job(
             db,
@@ -362,7 +361,7 @@ class PipelineRunner:
             node_map = {n.node_id: n for n in pipeline_version.nodes}
 
             # Store outputs for each node
-            outputs: Dict[str, Iterator[pd.DataFrame]] = {}
+            outputs: Dict[str, Iterator[pd.DataFrame]] = defaultdict(lambda: iter([])) # Initialize with empty iterators
 
             # Execute nodes in topological order
             for node_id in order:
@@ -375,14 +374,13 @@ class PipelineRunner:
                     input_data = {
                         upstream_id: outputs[upstream_id]
                         for upstream_id in upstream_nodes
-                        if upstream_id in outputs
                     }
-
                     # Validate that all expected inputs are available
                     if len(input_data) != len(upstream_nodes):
                         missing = upstream_nodes - set(input_data.keys())
                         raise AppError(
-                            f"Node {node_id} missing inputs from upstream nodes: {missing}"
+                            f"Node {node.name} ({node_id}) missing inputs from upstream nodes: {missing}. "
+                            "This usually indicates a problem in pipeline definition or a preceding node failing to produce output."
                         )
 
                 # Execute the node
@@ -391,8 +389,8 @@ class PipelineRunner:
                 # Store output if node produces data
                 if out is not None:
                     outputs[node_id] = out
-
-            # Mark pipeline as completed
+            
+            # If all nodes completed successfully, mark pipeline_run as completed
             pipeline_run.status = PipelineRunStatus.COMPLETED
             pipeline_run.completed_at = datetime.now(timezone.utc)
             if pipeline_run.started_at:
@@ -400,20 +398,22 @@ class PipelineRunner:
                     pipeline_run.completed_at - pipeline_run.started_at
                 ).total_seconds()
             db.add(pipeline_run)
-            db.commit()
-
+            db.flush() # Flush final status update
             logger.info("Pipeline completed", pipeline_version=pipeline_version.id)
+
             DBLogger.log_job(
                 db,
                 job_id,
                 "INFO",
-                f"PipelineRun {next_run} succeeded.",
+                f"PipelineRun {pipeline_run.run_number} succeeded.",
                 metadata={"pipeline_run_id": pipeline_run.id},
                 source="runner",
             )
 
         except Exception as e:
-            db.rollback()
+            # Handle the pipeline run failure at this level
+            # The outer task is responsible for committing/rolling back the session
+            # Mark the pipeline_run as failed
             pipeline_run.status = PipelineRunStatus.FAILED
             pipeline_run.completed_at = datetime.now(timezone.utc)
             if pipeline_run.started_at:
@@ -422,7 +422,7 @@ class PipelineRunner:
                 ).total_seconds()
             pipeline_run.error_message = str(e)
             db.add(pipeline_run)
-            db.commit()
+            db.flush() # Flush final status update before re-raising
 
             logger.error(
                 "Pipeline failed", pipeline_version=pipeline_version.id, error=str(e)
@@ -431,10 +431,11 @@ class PipelineRunner:
                 db,
                 job_id,
                 "ERROR",
-                f"PipelineRun {next_run} failed: {e}",
+                f"PipelineRun {pipeline_run.run_number} failed: {e}",
                 metadata={"pipeline_run_id": pipeline_run.id},
                 source="runner",
             )
+            # Re-raise the exception to be caught by the Celery task
             raise
 
     def _validate_dag_semantics(

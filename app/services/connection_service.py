@@ -1,14 +1,16 @@
 from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 import time
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import and_
+from sqlalchemy import and_, or_, func, distinct
 
 from app.models.connections import Connection, Asset, AssetSchemaVersion
-from app.models.enums import ConnectorType
+from app.models.pipelines import Pipeline, PipelineVersion, PipelineNode
+from app.models.execution import Job, PipelineRun
+from app.models.enums import ConnectorType, JobStatus
 from app.schemas.connection import (
     ConnectionCreate,
     ConnectionUpdate,
@@ -17,6 +19,8 @@ from app.schemas.connection import (
     ConnectionTestResponse,
     AssetDiscoverResponse,
     SchemaDiscoveryResponse,
+    ConnectionImpactRead,
+    ConnectionUsageStatsRead,
 )
 from app.core.errors import AppError
 from app.services.vault_service import VaultService
@@ -515,6 +519,30 @@ class ConnectionService:
                 success=False, message=f"Failed to discover schema: {str(e)}"
             )
 
+    def get_sample_data(
+        self, asset_id: int, limit: int = 100, user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        asset = self.get_asset(asset_id, user_id=user_id)
+        if not asset:
+            raise AppError(f"Asset {asset_id} not found")
+
+        try:
+            config = VaultService.get_connector_config(asset.connection)
+            connector = ConnectorFactory.get_connector(
+                asset.connection.connector_type.value, config
+            )
+
+            with connector.session() as session:
+                rows = session.fetch_sample(asset.name, limit=limit)
+
+            return {
+                "asset_id": asset_id,
+                "rows": rows,
+                "count": len(rows)
+            }
+        except Exception as e:
+            raise AppError(f"Failed to fetch sample data: {str(e)}")
+
     def _detect_breaking_changes(
         self, old_schema: Dict[str, Any], new_schema: Dict[str, Any]
     ) -> bool:
@@ -527,3 +555,82 @@ class ConnectionService:
             if col.get("type") != new_cols[name].get("type"):
                 return True
         return False
+
+    def get_connection_impact(self, connection_id: int, user_id: Optional[int] = None) -> ConnectionImpactRead:
+        # Validate connection exists and user has access
+        connection = self.get_connection(connection_id, user_id=user_id)
+        if not connection:
+            raise AppError(f"Connection {connection_id} not found.")
+
+        # Query to find distinct pipelines that use assets from this connection
+        # A pipeline uses a connection if any of its nodes refer to an asset belonging to that connection
+        pipeline_count_query = self.db_session.query(func.count(distinct(Pipeline.id))). \
+            join(PipelineVersion, Pipeline.id == PipelineVersion.pipeline_id). \
+            join(PipelineNode, PipelineVersion.id == PipelineNode.pipeline_version_id). \
+            join(Asset, or_(PipelineNode.source_asset_id == Asset.id, PipelineNode.destination_asset_id == Asset.id)). \
+            filter(Asset.connection_id == connection_id) # Only count non-deleted pipelines
+
+        if user_id is not None:
+            pipeline_count_query = pipeline_count_query.filter(Pipeline.user_id == user_id)
+
+        pipeline_count = pipeline_count_query.scalar()
+
+        return ConnectionImpactRead(pipeline_count=pipeline_count or 0)
+
+    def get_connection_usage_stats(self, connection_id: int, user_id: Optional[int] = None) -> ConnectionUsageStatsRead:
+        # Validate connection exists and user has access
+        connection = self.get_connection(connection_id, user_id=user_id)
+        if not connection:
+            raise AppError(f"Connection {connection_id} not found.")
+
+        now = datetime.now(timezone.utc)
+        last_24h = now - timedelta(hours=24)
+        last_7d = now - timedelta(days=7)
+
+        # Base query for jobs related to this connection
+        # A job is related if its pipeline uses any asset from this connection
+        base_job_query = self.db_session.query(Job, PipelineRun). \
+            join(Pipeline, Job.pipeline_id == Pipeline.id). \
+            join(PipelineVersion, Pipeline.id == PipelineVersion.pipeline_id). \
+            join(PipelineNode, PipelineVersion.id == PipelineNode.pipeline_version_id). \
+            join(Asset, or_(PipelineNode.source_asset_id == Asset.id, PipelineNode.destination_asset_id == Asset.id)). \
+            join(PipelineRun, Job.id == PipelineRun.job_id). \
+            filter(Asset.connection_id == connection_id)
+        
+        if user_id is not None:
+            base_job_query = base_job_query.filter(Pipeline.user_id == user_id)
+
+        # Filter for jobs that have actually completed (SUCCESS or FAILED)
+        completed_jobs_filter = Job.status.in_([JobStatus.SUCCESS, JobStatus.FAILED])
+
+        # 24h stats
+        results_24h = base_job_query.filter(Job.completed_at >= last_24h, completed_jobs_filter).all()
+        jobs_24h = [job for job, run in results_24h]
+        pipeline_runs_24h = [run for job, run in results_24h]
+
+        total_runs_24h = len(jobs_24h)
+        successful_runs_24h = len([j for j in jobs_24h if j.status == JobStatus.SUCCESS])
+        
+        sync_success_rate = (successful_runs_24h / total_runs_24h * 100) if total_runs_24h > 0 else 0.0
+
+        total_latency_seconds = sum([r.duration_seconds for r in pipeline_runs_24h if r.duration_seconds is not None])
+        average_latency_ms = (total_latency_seconds / total_runs_24h * 1000) if total_runs_24h > 0 else None
+
+        # Last 7 days runs count (any status, just for total activity)
+        # Using a distinct count of job IDs to avoid overcounting if a job has multiple related pipeline nodes
+        last_7d_runs_count = self.db_session.query(func.count(distinct(Job.id))). \
+            select_from(base_job_query.subquery()). \
+            filter(Job.completed_at >= last_7d).scalar()
+
+
+        # Data Extracted (GB) - Currently not explicitly tracked per connection/job in this system
+        # A placeholder value is used. Future enhancement would involve detailed metrics.
+        data_extracted_gb_24h = 0.0 # Placeholder
+
+        return ConnectionUsageStatsRead(
+            sync_success_rate=round(sync_success_rate, 2),
+            average_latency_ms=round(average_latency_ms, 2) if average_latency_ms is not None else None,
+            data_extracted_gb_24h=data_extracted_gb_24h,
+            last_24h_runs=total_runs_24h,
+            last_7d_runs=last_7d_runs_count or 0
+        )

@@ -42,6 +42,76 @@ def list_alert_configs(
         models.AlertConfig.user_id == current_user.id
     ).offset(skip).limit(limit).all()
 
+@router.delete("/{alert_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_alert_config(
+    *,
+    db: Session = Depends(deps.get_db),
+    alert_id: int,
+    current_user: models.User = Depends(deps.get_current_user),
+) -> None:
+    """
+    Delete alert configuration.
+    """
+    alert = db.query(models.AlertConfig).filter(
+        models.AlertConfig.id == alert_id,
+        models.AlertConfig.user_id == current_user.id
+    ).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert config not found")
+    
+    db.delete(alert)
+    db.commit()
+    return None
+
+# Alert Instance Endpoints
+
+@router.get("/history", response_model=List[alert_schema.AlertRead])
+def list_alerts(
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+    skip: int = 0,
+    limit: int = 100,
+) -> Any:
+    """
+    List individual alerts.
+    """
+    # Alerts are linked to alert_configs which are linked to users
+    return db.query(models.Alert).join(
+        models.AlertConfig, models.Alert.alert_config_id == models.AlertConfig.id
+    ).filter(
+        models.AlertConfig.user_id == current_user.id
+    ).order_by(models.Alert.created_at.desc()).offset(skip).limit(limit).all()
+
+@router.patch("/history/{alert_id}", response_model=alert_schema.AlertRead)
+def update_alert_status(
+    *,
+    db: Session = Depends(deps.get_db),
+    alert_id: int,
+    alert_in: alert_schema.AlertUpdate,
+    current_user: models.User = Depends(deps.get_current_user),
+) -> Any:
+    """
+    Update alert status (e.g., acknowledge).
+    """
+    alert = db.query(models.Alert).join(
+        models.AlertConfig, models.Alert.alert_config_id == models.AlertConfig.id
+    ).filter(
+        models.Alert.id == alert_id,
+        models.AlertConfig.user_id == current_user.id
+    ).first()
+    
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    
+    update_data = alert_in.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(alert, field, value)
+    
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+    return alert
+
 @router.get("/{alert_id}", response_model=alert_schema.AlertConfigRead)
 def get_alert_config(
     *,
@@ -86,24 +156,3 @@ def update_alert_config(
     db.commit()
     db.refresh(alert)
     return alert
-
-@router.delete("/{alert_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_alert_config(
-    *,
-    db: Session = Depends(deps.get_db),
-    alert_id: int,
-    current_user: models.User = Depends(deps.get_current_user),
-) -> None:
-    """
-    Delete alert configuration.
-    """
-    alert = db.query(models.AlertConfig).filter(
-        models.AlertConfig.id == alert_id,
-        models.AlertConfig.user_id == current_user.id
-    ).first()
-    if not alert:
-        raise HTTPException(status_code=404, detail="Alert config not found")
-    
-    db.delete(alert)
-    db.commit()
-    return None
