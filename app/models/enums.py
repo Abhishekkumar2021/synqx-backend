@@ -114,6 +114,7 @@ class AlertStatus(str, enum.Enum):
     SKIPPED = "skipped"
 
 class AlertType(str, enum.Enum):
+    JOB_STARTED = "job_started"
     JOB_FAILURE = "job_failure"
     JOB_SUCCESS = "job_success"
     DATA_QUALITY_FAILURE = "data_quality_failure"

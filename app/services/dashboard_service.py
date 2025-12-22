@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, case, and_, desc
 
 from app.models.pipelines import Pipeline
-from app.models.execution import Job
+from app.models.execution import Job, PipelineRun
 from app.models.connections import Connection
 from app.models.enums import PipelineStatus, JobStatus
 from app.schemas.dashboard import DashboardStats, ThroughputDataPoint, PipelineDistribution, RecentActivity
@@ -38,8 +38,10 @@ class DashboardService:
             jobs_24h_query = self.db.query(
                 func.count(Job.id).label("total"),
                 func.sum(case((Job.status == JobStatus.SUCCESS, 1), else_=0)).label("success"),
-                func.avg(Job.execution_time_ms).label("avg_duration")
-            ).join(Pipeline).filter(
+                func.avg(Job.execution_time_ms).label("avg_duration"),
+                func.sum(PipelineRun.total_loaded).label("total_rows"),
+                func.sum(PipelineRun.bytes_processed).label("total_bytes")
+            ).select_from(Job).join(Pipeline, Job.pipeline_id == Pipeline.id).outerjoin(PipelineRun, Job.id == PipelineRun.job_id).filter(
                 and_(
                     Pipeline.user_id == user_id,
                     Job.created_at >= one_day_ago
@@ -52,6 +54,8 @@ class DashboardService:
             success_rate_24h = (success_jobs_24h / total_jobs_24h * 100) if total_jobs_24h > 0 else 0.0
             avg_duration_ms = float(jobs_stats.avg_duration or 0)
             avg_duration_24h = avg_duration_ms / 1000.0
+            total_rows_24h = int(jobs_stats.total_rows or 0)
+            total_bytes_24h = int(jobs_stats.total_bytes or 0)
 
             # 2. Pipeline Distribution
             dist_query = self.db.query(
@@ -75,8 +79,10 @@ class DashboardService:
             hourly_stats = self.db.query(
                 hour_col.label('hour'),
                 func.sum(case((Job.status == JobStatus.SUCCESS, 1), else_=0)).label("success"),
-                func.sum(case((Job.status == JobStatus.FAILED, 1), else_=0)).label("failure")
-            ).join(Pipeline).filter(
+                func.sum(case((Job.status == JobStatus.FAILED, 1), else_=0)).label("failure"),
+                func.sum(PipelineRun.total_loaded).label("rows"),
+                func.sum(PipelineRun.bytes_processed).label("bytes")
+            ).select_from(Job).join(Pipeline, Job.pipeline_id == Pipeline.id).outerjoin(PipelineRun, Job.id == PipelineRun.job_id).filter(
                 and_(
                     Pipeline.user_id == user_id,
                     Job.created_at >= one_day_ago
@@ -96,7 +102,9 @@ class DashboardService:
                 throughput.append(ThroughputDataPoint(
                     timestamp=ts,
                     success_count=row.success or 0,
-                    failure_count=row.failure or 0
+                    failure_count=row.failure or 0,
+                    rows_processed=int(row.rows or 0),
+                    bytes_processed=int(row.bytes or 0)
                 ))
 
             # 4. Recent Activity
@@ -128,6 +136,8 @@ class DashboardService:
                 success_rate_24h=round(success_rate_24h, 1),
                 avg_duration_24h=round(avg_duration_24h, 2),
                 total_connections=total_connections,
+                total_rows_24h=total_rows_24h,
+                total_bytes_24h=total_bytes_24h,
                 throughput=throughput,
                 pipeline_distribution=distribution,
                 recent_activity=activity

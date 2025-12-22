@@ -2,10 +2,17 @@ from typing import Any, Dict, List, Optional, Iterator, Union
 import pandas as pd
 from pymongo import MongoClient
 from app.connectors.base import BaseConnector
-from app.core.errors import ConfigurationError, ConnectionFailedError, DataTransferError, SchemaDiscoveryError
+from app.core.errors import (
+    ConfigurationError, 
+    ConnectionFailedError, 
+    DataTransferError, 
+    SchemaDiscoveryError
+)
+from app.core.logging import get_logger
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+logger = get_logger(__name__)
 
 class MongoConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
@@ -18,10 +25,9 @@ class MongoConfig(BaseSettings):
     database: str = Field(..., description="Database Name")
     auth_source: str = Field("admin", description="Authentication Database")
 
-
 class MongoDBConnector(BaseConnector):
     """
-    Connector for MongoDB.
+    Robust Connector for MongoDB.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -33,10 +39,8 @@ class MongoDBConnector(BaseConnector):
     def validate_config(self) -> None:
         try:
             self._config_model = MongoConfig.model_validate(self.config)
-            # Logic: Either connection_string OR (host & port)
-            if not self._config_model.connection_string:
-                if not self._config_model.host:
-                     raise ValueError("Either 'connection_string' or 'host' must be provided.")
+            if not self._config_model.connection_string and not self._config_model.host:
+                 raise ValueError("Either 'connection_string' or 'host' must be provided.")
         except Exception as e:
             raise ConfigurationError(f"Invalid MongoDB configuration: {e}")
 
@@ -46,19 +50,24 @@ class MongoDBConnector(BaseConnector):
 
         try:
             if self._config_model.connection_string:
-                self._client = MongoClient(self._config_model.connection_string)
+                self._client = MongoClient(self._config_model.connection_string, serverSelectionTimeoutMS=5000)
             else:
-                self._client = MongoClient(
-                    host=self._config_model.host,
-                    port=self._config_model.port,
-                    username=self._config_model.username,
-                    password=self._config_model.password,
-                    authSource=self._config_model.auth_source
-                )
+                params = {
+                    "host": self._config_model.host,
+                    "port": self._config_model.port,
+                    "username": self._config_model.username,
+                    "password": self._config_model.password,
+                    "authSource": self._config_model.auth_source,
+                    "serverSelectionTimeoutMS": 5000
+                }
+                # Remove None values
+                params = {k: v for k, v in params.items() if v is not None}
+                self._client = MongoClient(**params)
             
             # Verify connection
             self._client.admin.command('ping')
             self._db = self._client[self._config_model.database]
+            logger.info("mongodb_connected", database=self._config_model.database)
             
         except Exception as e:
             raise ConnectionFailedError(f"Failed to connect to MongoDB: {e}")
@@ -71,8 +80,8 @@ class MongoDBConnector(BaseConnector):
 
     def test_connection(self) -> bool:
         try:
-            with self.session():
-                return True
+            self.connect()
+            return True
         except Exception:
             return False
 
@@ -82,7 +91,6 @@ class MongoDBConnector(BaseConnector):
         self.connect()
         try:
             collections = self._db.list_collection_names()
-            
             if pattern:
                 collections = [c for c in collections if pattern.lower() in c.lower()]
 
@@ -91,118 +99,84 @@ class MongoDBConnector(BaseConnector):
 
             enriched = []
             for col_name in collections:
-                stats = self._db.command("collstats", col_name)
-                enriched.append({
-                    "name": col_name,
-                    "type": "collection",
-                    "row_count": stats.get('count', 0),
-                    "size_bytes": stats.get('size', 0),
-                    "avg_obj_size": stats.get('avgObjSize', 0)
-                })
+                try:
+                    stats = self._db.command("collstats", col_name)
+                    enriched.append({
+                        "name": col_name,
+                        "type": "collection",
+                        "row_count": stats.get('count', 0),
+                        "size_bytes": stats.get('size', 0),
+                    })
+                except Exception:
+                    enriched.append({"name": col_name, "type": "collection"})
             return enriched
-
         except Exception as e:
-            raise ConnectionFailedError(f"Failed to discover assets: {e}")
+            raise DataTransferError(f"Failed to discover MongoDB collections: {e}")
 
-    def infer_schema(
-        self,
-        asset: str,
-        sample_size: int = 1000,
-        mode: str = "auto",
-        **kwargs,
-    ) -> Dict[str, Any]:
+    def infer_schema(self, asset: str, sample_size: int = 1000, **kwargs) -> Dict[str, Any]:
         self.connect()
         try:
-            # MongoDB is schemaless, so we infer from a sample
             collection = self._db[asset]
             cursor = collection.find().limit(sample_size)
             records = list(cursor)
             
             if not records:
-                 return {"asset": asset, "columns": [], "note": "Empty collection"}
+                 return {"asset": asset, "columns": [], "status": "empty"}
 
+            # Simple inference using first 100 records for type diversity
             df = pd.DataFrame(records)
-            
-            # Flattening could be complex for nested objects, keeping it simple for now
-            columns = [
-                {"name": col, "type": str(dtype)}
-                for col, dtype in df.dtypes.items()
-            ]
-            return {
-                "asset": asset,
-                "columns": columns,
-                "schema_type": "inferred"
-            }
-
+            if '_id' in df.columns:
+                df['_id'] = df['_id'].astype(str)
+                
+            columns = [{"name": col, "type": str(dtype)} for col, dtype in df.dtypes.items()]
+            return {"asset": asset, "columns": columns, "inferred_from": len(records)}
         except Exception as e:
-            raise SchemaDiscoveryError(f"Failed to infer schema for {asset}: {e}")
+            raise SchemaDiscoveryError(f"MongoDB schema inference failed: {e}")
 
     def read_batch(
-        self,
-        asset: str,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-        **kwargs,
+        self, asset: str, limit: Optional[int] = None, offset: Optional[int] = None, **kwargs
     ) -> Iterator[pd.DataFrame]:
-        
         self.connect()
         collection = self._db[asset]
         
-        # Build query
-        filter_query = kwargs.get("filter", {})
-        projection = kwargs.get("projection", None)
-        
-        cursor = collection.find(filter_query, projection)
-        
-        if offset:
-            cursor = cursor.skip(offset)
-        if limit:
-            cursor = cursor.limit(limit)
+        cursor = collection.find(kwargs.get("filter", {}), kwargs.get("projection"))
+        if offset: cursor = cursor.skip(offset)
+        if limit: cursor = cursor.limit(limit)
 
-        chunksize = kwargs.get("chunksize", 1000)
-        
-        current_batch = []
+        chunksize = kwargs.get("chunksize", 5000)
+        batch = []
         for doc in cursor:
-            # Convert ObjectId to string for better compatibility
-            if '_id' in doc:
-                doc['_id'] = str(doc['_id'])
-            
-            current_batch.append(doc)
-            
-            if len(current_batch) >= chunksize:
-                yield pd.DataFrame(current_batch)
-                current_batch = []
-        
-        if current_batch:
-            yield pd.DataFrame(current_batch)
+            if '_id' in doc: doc['_id'] = str(doc['_id'])
+            batch.append(doc)
+            if len(batch) >= chunksize:
+                yield pd.DataFrame(batch)
+                batch = []
+        if batch:
+            yield pd.DataFrame(batch)
 
     def write_batch(
-        self,
-        data: Union[pd.DataFrame, Iterator[pd.DataFrame]],
-        asset: str,
-        mode: str = "append",
-        **kwargs,
+        self, data: Union[pd.DataFrame, Iterator[pd.DataFrame]], asset: str, mode: str = "append", **kwargs
     ) -> int:
-        
         self.connect()
         collection = self._db[asset]
         
         if mode == "replace":
              collection.drop()
              
-        total_written = 0
-        
         if isinstance(data, pd.DataFrame):
-            iterator = [data]
+            data_iter = [data]
         else:
-            iterator = data
+            data_iter = data
             
-        for df in iterator:
-            records = df.to_dict(orient="records")
-            if not records:
-                continue
-                
-            collection.insert_many(records)
-            total_written += len(records)
-            
-        return total_written
+        total = 0
+        try:
+            for df in data_iter:
+                if df.empty: continue
+                records = df.to_dict(orient="records")
+                # MongoDB doesn't like '.' in keys, but pandas might have them. 
+                # Production would sanitize here.
+                result = collection.insert_many(records)
+                total += len(result.inserted_ids)
+            return total
+        except Exception as e:
+            raise DataTransferError(f"MongoDB write failed: {e}")

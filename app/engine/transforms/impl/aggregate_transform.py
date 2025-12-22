@@ -12,38 +12,35 @@ class AggregateTransform(BaseTransform):
     """
 
     def validate_config(self) -> None:
-        if "group_by" not in self.config:
-            raise ConfigurationError("AggregateTransform requires 'group_by' in config.")
-        if "aggregates" not in self.config:
-            raise ConfigurationError("AggregateTransform requires 'aggregates' in config.")
+        self.get_config_value("group_by", required=True)
+        self.get_config_value("aggregates", required=True)
 
     def transform(self, data: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         group_cols = self.config["group_by"]
         agg_map = self.config["aggregates"]
         
-        # NOTE: Aggregation on streaming data (chunks) is complex because 
-        # a group might be split across chunks. 
-        # Ideally, this requires a stateful processor or a blocking operation 
-        # that accumulates everything.
-        # For this prototype, we will accumulate ALL chunks into memory (Warning: Memory Intensive)
-        # then aggregate. A production system would use a database or specialized stream processor.
-        
-        accumulated_df = pd.DataFrame()
-        
-        for df in data:
-            accumulated_df = pd.concat([accumulated_df, df])
+        # Accumulate ALL chunks into memory for blocking aggregation
+        try:
+            accumulated_df = pd.concat(list(data))
+        except ValueError:
+            # Empty sequence
+            return
             
         if not accumulated_df.empty:
-            # Check if group columns exist
             valid_group_cols = [c for c in group_cols if c in accumulated_df.columns]
             if not valid_group_cols:
-                 # If grouping keys are missing, we can't group. Return as is or empty? 
-                 # Let's return empty to signify failure to group, or raise error.
-                 # For now, just yield nothing.
+                 logger.error(f"None of the grouping columns {group_cols} found in data.")
                  return
 
             try:
-                result = accumulated_df.groupby(valid_group_cols).agg(agg_map).reset_index()
+                # Ensure agg columns exist
+                valid_agg_map = {k: v for k, v in agg_map.items() if k in accumulated_df.columns}
+                if not valid_agg_map:
+                    logger.error(f"None of the aggregate columns {list(agg_map.keys())} found in data.")
+                    return
+                    
+                result = accumulated_df.groupby(valid_group_cols).agg(valid_agg_map).reset_index()
                 yield result
             except Exception as e:
-                raise ConfigurationError(f"Aggregation failed: {e}")
+                from app.core.errors import AppError
+                raise AppError(f"Aggregation execution failed: {e}")

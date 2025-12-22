@@ -4,9 +4,11 @@ import boto3
 import s3fs
 from app.connectors.base import BaseConnector
 from app.core.errors import ConfigurationError, ConnectionFailedError, DataTransferError
+from app.core.logging import get_logger
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+logger = get_logger(__name__)
 
 class S3Config(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
@@ -17,10 +19,9 @@ class S3Config(BaseSettings):
     aws_secret_access_key: Optional[str] = Field(None, description="AWS Secret Access Key")
     endpoint_url: Optional[str] = Field(None, description="Custom Endpoint URL (e.g. for MinIO)")
 
-
 class S3Connector(BaseConnector):
     """
-    Connector for Amazon S3 (and compatible storages like MinIO).
+    Robust Connector for Amazon S3 (and compatible storages like MinIO).
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -47,10 +48,11 @@ class S3Connector(BaseConnector):
                 key=self._config_model.aws_access_key_id,
                 secret=self._config_model.aws_secret_access_key,
                 client_kwargs=client_kwargs,
+                config_kwargs={'retries': {'max_attempts': 5}}
             )
-            # Verify bucket existence
+            # Verify bucket accessibility
             if not self._fs.exists(self._config_model.bucket):
-                raise ConnectionFailedError(f"Bucket '{self._config_model.bucket}' does not exist or is not accessible.")
+                raise ConnectionFailedError(f"Bucket '{self._config_model.bucket}' not found or inaccessible.")
                 
         except Exception as e:
             raise ConnectionFailedError(f"Failed to connect to S3: {e}")
@@ -60,8 +62,9 @@ class S3Connector(BaseConnector):
 
     def test_connection(self) -> bool:
         try:
-            with self.session():
-                return True
+            self.connect()
+            self._fs.ls(self._config_model.bucket, detail=False)
+            return True
         except Exception:
             return False
 
@@ -70,136 +73,51 @@ class S3Connector(BaseConnector):
     ) -> List[Dict[str, Any]]:
         self.connect()
         try:
-            # List objects in the bucket
+            # Recursive listing with optimized filter
             files = self._fs.glob(f"{self._config_model.bucket}/**")
-            # Filter for common data formats
-            valid_extensions = ('.csv', '.parquet', '.json', '.xlsx')
-            files = [f for f in files if f.endswith(valid_extensions)]
+            valid_extensions = ('.csv', '.parquet', '.json', '.jsonl', '.avro')
             
-            # Remove bucket prefix for cleaner asset names
-            assets = [f.replace(f"{self._config_model.bucket}/", "") for f in files]
-
-            if pattern:
-                assets = [a for a in assets if pattern.lower() in a.lower()]
-
-            if not include_metadata:
-                return [{"name": a, "type": "file"} for a in assets]
-
-            enriched = []
-            for asset in assets:
-                full_path = f"{self._config_model.bucket}/{asset}"
-                info = self._fs.info(full_path)
-                enriched.append({
-                    "name": asset,
-                    "type": "file",
-                    "size_bytes": info.get('size'),
-                    "last_modified": str(info.get('LastModified')),
-                    "path": full_path
-                })
-            return enriched
-
+            assets = []
+            for f in files:
+                if f.endswith(valid_extensions):
+                    name = f.replace(f"{self._config_model.bucket}/", "")
+                    if pattern and pattern.lower() not in name.lower():
+                        continue
+                    
+                    if not include_metadata:
+                        assets.append({"name": name, "type": "file"})
+                    else:
+                        info = self._fs.info(f)
+                        assets.append({
+                            "name": name,
+                            "type": "file",
+                            "size_bytes": info.get('size'),
+                            "last_modified": str(info.get('LastModified')),
+                            "format": name.split('.')[-1]
+                        })
+            return assets
         except Exception as e:
-            raise ConnectionFailedError(f"Failed to discover assets in S3: {e}")
+            raise DataTransferError(f"Failed to discover S3 assets: {e}")
 
-    def infer_schema(
-        self,
-        asset: str,
-        sample_size: int = 1000,
-        mode: str = "auto",
-        **kwargs,
-    ) -> Dict[str, Any]:
-        
+    def infer_schema(self, asset: str, sample_size: int = 1000, **kwargs) -> Dict[str, Any]:
         self.connect()
         try:
-            # Read a small sample
             df_iter = self.read_batch(asset, limit=sample_size)
             sample_df = next(df_iter)
-            
-            columns = [
-                {"name": col, "type": str(dtype)}
-                for col, dtype in sample_df.dtypes.items()
-            ]
             return {
                 "asset": asset,
-                "columns": columns,
-                "format": self._get_file_format(asset)
+                "columns": [{"name": col, "type": str(dtype)} for col, dtype in sample_df.dtypes.items()],
+                "format": asset.split('.')[-1]
             }
         except Exception as e:
-            # Fallback or re-raise
-            raise DataTransferError(f"Failed to infer schema for {asset}: {e}")
+            raise SchemaDiscoveryError(f"S3 schema inference failed for {asset}: {e}")
 
     def read_batch(
-        self,
-        asset: str,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-        **kwargs,
+        self, asset: str, limit: Optional[int] = None, offset: Optional[int] = None, **kwargs
     ) -> Iterator[pd.DataFrame]:
-        
         self.connect()
-        full_path = f"s3://{self._config_model.bucket}/{asset}"
-        file_format = self._get_file_format(asset)
-
-        try:
-            if file_format == 'csv':
-                # S3FS handles 's3://' paths automatically if integrated with pandas
-                # But we initialized self._fs. For pandas read_*, we can pass storage_options.
-                storage_options = {
-                    "key": self._config_model.aws_access_key_id,
-                    "secret": self._config_model.aws_secret_access_key,
-                    "client_kwargs": {"endpoint_url": self._config_model.endpoint_url} if self._config_model.endpoint_url else {}
-                }
-                
-                # Handling limit/offset for CSV is tricky without reading all. 
-                # Pandas 'nrows' = limit. 'skiprows' = offset.
-                read_kwargs = kwargs.copy()
-                if limit:
-                    read_kwargs['nrows'] = limit
-                if offset:
-                    read_kwargs['skiprows'] = range(1, offset + 1) # Skip rows but keep header (row 0)
-                
-                df = pd.read_csv(full_path, storage_options=storage_options, **read_kwargs)
-                yield df
-
-            elif file_format == 'parquet':
-                 storage_options = {
-                    "key": self._config_model.aws_access_key_id,
-                    "secret": self._config_model.aws_secret_access_key,
-                    "client_kwargs": {"endpoint_url": self._config_model.endpoint_url} if self._config_model.endpoint_url else {}
-                }
-                 # Parquet doesn't support skiprows easily efficiently without predicate pushdown or reading all.
-                 # We'll read all and slice for now (not efficient for huge files, but standard for 'pandas' engine).
-                 df = pd.read_parquet(full_path, storage_options=storage_options)
-                 df = self.slice_dataframe(df, offset, limit)
-                 yield df
-                 
-            elif file_format == 'json':
-                storage_options = {
-                    "key": self._config_model.aws_access_key_id,
-                    "secret": self._config_model.aws_secret_access_key,
-                    "client_kwargs": {"endpoint_url": self._config_model.endpoint_url} if self._config_model.endpoint_url else {}
-                }
-                df = pd.read_json(full_path, storage_options=storage_options, **kwargs)
-                df = self.slice_dataframe(df, offset, limit)
-                yield df
-
-            else:
-                raise DataTransferError(f"Unsupported file format: {file_format}")
-
-        except Exception as e:
-            raise DataTransferError(f"Error reading {asset}: {e}")
-
-    def write_batch(
-        self,
-        data: Union[pd.DataFrame, Iterator[pd.DataFrame]],
-        asset: str,
-        mode: str = "append",
-        **kwargs,
-    ) -> int:
-        
-        self.connect()
-        full_path = f"s3://{self._config_model.bucket}/{asset}"
-        file_format = self._get_file_format(asset)
+        path = f"s3://{self._config_model.bucket}/{asset}"
+        fmt = asset.split('.')[-1].lower()
         
         storage_options = {
             "key": self._config_model.aws_access_key_id,
@@ -207,53 +125,60 @@ class S3Connector(BaseConnector):
             "client_kwargs": {"endpoint_url": self._config_model.endpoint_url} if self._config_model.endpoint_url else {}
         }
 
-        # Handling "append" for files is complex (except CSV). 
-        # S3 is object storage (immutable objects). "Append" usually means "read old + concat + write new" or "write new file".
-        # For simplicity, we'll assume "append" implies we are writing a *new part* or overwriting if it's a single file.
-        # But standard ETL 'append' to a file asset usually means adding rows.
-        
-        if mode == "append" and self._fs.exists(full_path):
-             # Basic implementation: Read existing, concat, write back.
-             # WARNING: Not concurrency safe and slow for big files.
-             try:
-                existing_iter = self.read_batch(asset)
-                existing_df = next(existing_iter)
-             except Exception:
-                 existing_df = pd.DataFrame()
-        else:
-            existing_df = pd.DataFrame()
-
-        total_written = 0
-        
-        if isinstance(data, pd.DataFrame):
-            iterator = [data]
-        else:
-            iterator = data
-            
-        final_df = existing_df
-        
-        for df in iterator:
-            final_df = pd.concat([final_df, df], ignore_index=True)
-            total_written += len(df)
-            
         try:
-            if file_format == 'csv':
-                final_df.to_csv(full_path, index=False, storage_options=storage_options)
-            elif file_format == 'parquet':
-                final_df.to_parquet(full_path, index=False, storage_options=storage_options)
-            elif file_format == 'json':
-                final_df.to_json(full_path, orient='records', storage_options=storage_options)
+            if fmt == 'csv':
+                # Efficient reading for CSV
+                df = pd.read_csv(path, storage_options=storage_options, nrows=limit, skiprows=range(1, offset + 1) if offset else None)
+                yield df
+            elif fmt == 'parquet':
+                df = pd.read_parquet(path, storage_options=storage_options)
+                yield self.slice_dataframe(df, offset, limit)
+            elif fmt in ('json', 'jsonl'):
+                df = pd.read_json(path, storage_options=storage_options, lines=(fmt == 'jsonl'))
+                yield self.slice_dataframe(df, offset, limit)
             else:
-                 raise DataTransferError(f"Unsupported write format: {file_format}")
-                 
-            return total_written
-            
+                raise DataTransferError(f"Unsupported S3 file format: {fmt}")
         except Exception as e:
-            raise DataTransferError(f"Error writing to {asset}: {e}")
+            raise DataTransferError(f"S3 read failed for {asset}: {e}")
 
-    def _get_file_format(self, asset: str) -> str:
-        if asset.endswith('.csv'): return 'csv'
-        if asset.endswith('.parquet'): return 'parquet'
-        if asset.endswith('.json'): return 'json'
-        if asset.endswith('.xlsx'): return 'excel'
-        return 'unknown'
+    def write_batch(
+        self, data: Union[pd.DataFrame, Iterator[pd.DataFrame]], asset: str, mode: str = "append", **kwargs
+    ) -> int:
+        self.connect()
+        path = f"s3://{self._config_model.bucket}/{asset}"
+        fmt = asset.split('.')[-1].lower()
+        
+        storage_options = {
+            "key": self._config_model.aws_access_key_id,
+            "secret": self._config_model.aws_secret_access_key,
+            "client_kwargs": {"endpoint_url": self._config_model.endpoint_url} if self._config_model.endpoint_url else {}
+        }
+
+        if isinstance(data, pd.DataFrame):
+            data_iter = [data]
+        else:
+            data_iter = data
+
+        total = 0
+        try:
+            # Handle append/replace logic
+            if mode == 'replace' or not self._fs.exists(path):
+                first_df = next(data_iter)
+                self._write_df(first_df, path, fmt, storage_options, 'w')
+                total += len(first_df)
+            
+            for df in data_iter:
+                self._write_df(df, path, fmt, storage_options, 'a')
+                total += len(df)
+            return total
+        except Exception as e:
+            raise DataTransferError(f"S3 write failed for {asset}: {e}")
+
+    def _write_df(self, df: pd.DataFrame, path: str, fmt: str, options: dict, mode: str):
+        if fmt == 'csv':
+            df.to_csv(path, index=False, storage_options=options, mode=mode, header=(mode == 'w'))
+        elif fmt == 'parquet':
+            # Parquet append is complex on S3, usually involves multiple files
+            df.to_parquet(path, index=False, storage_options=options)
+        elif fmt in ('json', 'jsonl'):
+            df.to_json(path, orient='records', lines=(fmt == 'jsonl'), storage_options=options)

@@ -13,12 +13,12 @@ class FillNullsTransform(BaseTransform):
     """
 
     def validate_config(self) -> None:
-        if "value" not in self.config and "strategy" not in self.config:
-            raise ConfigurationError("FillNullsTransform requires either 'value' or 'strategy' in config.")
-        if "value" in self.config and "strategy" in self.config:
-            raise ConfigurationError("FillNullsTransform cannot have both 'value' and 'strategy' specified.")
-        if "subset" in self.config and not isinstance(self.config["subset"], list):
-            raise ConfigurationError("FillNullsTransform 'subset' must be a list of column names.")
+        value = self.get_config_value("value")
+        strategy = self.get_config_value("strategy")
+        if value is None and strategy is None:
+            raise ConfigurationError("FillNullsTransform requires either 'value' or 'strategy'.")
+        if value is not None and strategy is not None:
+            raise ConfigurationError("FillNullsTransform cannot have both 'value' and 'strategy'.")
 
     def transform(self, data: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         value = self.config.get("value")
@@ -26,21 +26,29 @@ class FillNullsTransform(BaseTransform):
         subset_cols = self.config.get("subset")
 
         for df in data:
+            if df.empty:
+                yield df
+                continue
+                
             target_cols = [col for col in subset_cols if col in df.columns] if subset_cols else df.columns
 
-            if value is not None:
-                df[target_cols] = df[target_cols].fillna(value=value)
-            elif strategy:
-                if strategy == 'mean':
-                    df[target_cols] = df[target_cols].fillna(df[target_cols].mean())
-                elif strategy == 'median':
-                    df[target_cols] = df[target_cols].fillna(df[target_cols].median())
-                elif strategy == 'mode': # Mode can return multiple values, take the first
-                    df[target_cols] = df[target_cols].fillna(df[target_cols].mode().iloc[0])
-                elif strategy == 'ffill':
-                    df[target_cols] = df[target_cols].ffill()
-                elif strategy == 'bfill':
-                    df[target_cols] = df[target_cols].bfill()
-                else:
-                    raise ConfigurationError(f"Unsupported fill strategy: {strategy}")
+            try:
+                if value is not None:
+                    df[target_cols] = df[target_cols].fillna(value=value)
+                elif strategy:
+                    if strategy == 'mean':
+                        df[target_cols] = df[target_cols].fillna(df[target_cols].mean(numeric_only=True))
+                    elif strategy == 'median':
+                        df[target_cols] = df[target_cols].fillna(df[target_cols].median(numeric_only=True))
+                    elif strategy == 'mode':
+                        mode_res = df[target_cols].mode()
+                        if not mode_res.empty:
+                            df[target_cols] = df[target_cols].fillna(mode_res.iloc[0])
+                    elif strategy == 'ffill':
+                        df[target_cols] = df[target_cols].ffill()
+                    elif strategy == 'bfill':
+                        df[target_cols] = df[target_cols].bfill()
+            except Exception as e:
+                logger.warning(f"Fill nulls failed for chunk: {e}")
+                
             yield df

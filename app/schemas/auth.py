@@ -9,7 +9,7 @@ class TokenPayload(BaseModel):
     sub: Optional[str] = None
 
 class UserLogin(BaseModel):
-    email: EmailStr
+    username: EmailStr
     password: str
 
 class UserCreate(BaseModel):

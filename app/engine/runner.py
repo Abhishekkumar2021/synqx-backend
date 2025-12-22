@@ -394,8 +394,11 @@ class PipelineRunner:
             pipeline_run.status = PipelineRunStatus.COMPLETED
             pipeline_run.completed_at = datetime.now(timezone.utc)
             if pipeline_run.started_at:
+                start_dt = pipeline_run.started_at
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
                 pipeline_run.duration_seconds = (
-                    pipeline_run.completed_at - pipeline_run.started_at
+                    pipeline_run.completed_at - start_dt
                 ).total_seconds()
             db.add(pipeline_run)
             db.flush() # Flush final status update
@@ -417,8 +420,11 @@ class PipelineRunner:
             pipeline_run.status = PipelineRunStatus.FAILED
             pipeline_run.completed_at = datetime.now(timezone.utc)
             if pipeline_run.started_at:
+                start_dt = pipeline_run.started_at
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
                 pipeline_run.duration_seconds = (
-                    pipeline_run.completed_at - pipeline_run.started_at
+                    pipeline_run.completed_at - start_dt
                 ).total_seconds()
             pipeline_run.error_message = str(e)
             db.add(pipeline_run)

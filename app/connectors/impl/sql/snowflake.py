@@ -1,6 +1,5 @@
 from typing import Any, Dict, Optional
-from sqlalchemy import create_engine
-from app.connectors.impl.sql.postgres import PostgresConnector
+from app.connectors.impl.sql.base import SQLConnector
 from app.core.errors import ConfigurationError
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,27 +15,24 @@ class SnowflakeConfig(BaseSettings):
     schema_name: str = Field("PUBLIC", alias="schema", description="Schema")
     role: Optional[str] = Field(None, description="Role")
 
-class SnowflakeConnector(PostgresConnector):
+class SnowflakeConnector(SQLConnector):
     """
-    Connector for Snowflake using SQLAlchemy.
+    Robust Snowflake Connector using SQLAlchemy.
     """
-
-    def __init__(self, config: Dict[str, Any]):
-        self._config_model: Optional[SnowflakeConfig] = None
-        super().__init__(config)
 
     def validate_config(self) -> None:
         try:
-            self._config_model = SnowflakeConfig.model_validate(self.config)
+            SnowflakeConfig.model_validate(self.config)
         except Exception as e:
             raise ConfigurationError(f"Invalid Snowflake configuration: {e}")
 
     def _sqlalchemy_url(self) -> str:
+        conf = SnowflakeConfig.model_validate(self.config)
         url = (
-            f"snowflake://{self._config_model.user}:{self._config_model.password}"
-            f"@{self._config_model.account}/{self._config_model.database}/{self._config_model.schema_name}"
-            f"?warehouse={self._config_model.warehouse}"
+            f"snowflake://{conf.user}:{conf.password}"
+            f"@{conf.account}/{conf.database}/{conf.schema_name}"
+            f"?warehouse={conf.warehouse}"
         )
-        if self._config_model.role:
-            url += f"&role={self._config_model.role}"
+        if conf.role:
+            url += f"&role={conf.role}"
         return url

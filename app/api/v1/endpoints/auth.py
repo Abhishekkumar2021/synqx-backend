@@ -9,7 +9,7 @@ from app.core import security
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.user import User
-from app.schemas.auth import Token, UserCreate, UserRead, UserLogin, UserUpdate
+from app.schemas.auth import Token, UserCreate, UserRead, UserUpdate
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -20,7 +20,7 @@ def login_access_token(
     form_data: OAuth2PasswordRequestForm = Depends()
 ) -> Any:
     """
-    OAuth2 compatible token login, get an access token for future requests
+    Get an access token for future requests using email and password
     """
     user = db.query(User).filter(User.email == form_data.username.lower()).first()
     

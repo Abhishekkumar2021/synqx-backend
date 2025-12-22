@@ -159,6 +159,16 @@ def get_pipeline(
                 version_detail
             )
 
+    # Fetch latest version (even if not published) for editing
+    if pipeline.versions:
+        # Relationship is ordered by version desc in the model
+        latest_v = pipeline.versions[0]
+        latest_detail = service.get_pipeline_version(
+            pipeline.id, latest_v.id, user_id=current_user.id
+        )
+        if latest_detail:
+            response.latest_version = PipelineVersionRead.model_validate(latest_detail)
+
     if pipeline.versions:
         response.versions = [
             PipelineVersionSummary(

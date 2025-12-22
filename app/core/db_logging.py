@@ -26,21 +26,26 @@ class DBLogger:
         """
         try:
             timestamp = datetime.now(timezone.utc)
-            log_entry = JobLog(
-                job_id=job_id,
-                level=level.upper(),
-                message=message,
-                metadata_payload=metadata,
-                timestamp=timestamp,
-                source=source,
-            )
-            session.add(log_entry)
-            session.flush() # Flush to assign ID and ensure it's pending commit
+            log_id = None
+            
+            # Use a savepoint to ensure log failures don't abort the main transaction
+            with session.begin_nested():
+                log_entry = JobLog(
+                    job_id=job_id,
+                    level=level.upper(),
+                    message=message,
+                    metadata_payload=metadata,
+                    timestamp=timestamp,
+                    source=source,
+                )
+                session.add(log_entry)
+                session.flush() # Flush to assign ID
+                log_id = log_entry.id
             
             # Publish to Redis channel
             payload = {
                 "type": "job_log",
-                "id": log_entry.id,
+                "id": log_id,
                 "job_id": job_id,
                 "level": level.upper(),
                 "message": message,
@@ -60,21 +65,25 @@ class DBLogger:
         """
         try:
             timestamp = datetime.now(timezone.utc)
-            log_entry = StepLog(
-                step_run_id=step_run_id,
-                level=level.upper(),
-                message=message,
-                metadata_payload=metadata,
-                timestamp=timestamp,
-                source=source,
-            )
-            session.add(log_entry)
-            session.flush()
+            log_id = None
+
+            with session.begin_nested():
+                log_entry = StepLog(
+                    step_run_id=step_run_id,
+                    level=level.upper(),
+                    message=message,
+                    metadata_payload=metadata,
+                    timestamp=timestamp,
+                    source=source,
+                )
+                session.add(log_entry)
+                session.flush()
+                log_id = log_entry.id
             
             # Publish to Redis channel
             payload = {
                 "type": "step_log",
-                "id": log_entry.id,
+                "id": log_id,
                 "step_run_id": step_run_id,
                 "level": level.upper(),
                 "message": message,

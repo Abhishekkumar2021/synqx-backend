@@ -107,6 +107,23 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 source="worker",
             )
 
+            # Trigger Job Started Alert
+            try:
+                from app.services.alert_service import AlertService
+                from app.models.enums import AlertType, AlertLevel
+                # Use a separate session for alerts to avoid aborting the main transaction on error
+                with session_scope() as alert_session:
+                    AlertService.trigger_alerts(
+                        alert_session,
+                        alert_type=AlertType.JOB_STARTED,
+                        pipeline_id=job.pipeline_id,
+                        job_id=job.id,
+                        message=f"Pipeline execution started (attempt {self.request.retries + 1})",
+                        level=AlertLevel.INFO
+                    )
+            except Exception as alert_err:
+                logger.error(f"Failed to create start alerts: {alert_err}")
+
             # Fetch pipeline version
             pipeline_version = (
                 session.query(PipelineVersion)
@@ -166,14 +183,15 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 try:
                     from app.services.alert_service import AlertService
                     from app.models.enums import AlertType, AlertLevel
-                    AlertService.trigger_alerts(
-                        session,
-                        alert_type=AlertType.JOB_SUCCESS,
-                        pipeline_id=job.pipeline_id,
-                        job_id=job.id,
-                        message=f"Pipeline execution completed successfully",
-                        level=AlertLevel.SUCCESS
-                    )
+                    with session_scope() as alert_session:
+                        AlertService.trigger_alerts(
+                            alert_session,
+                            alert_type=AlertType.JOB_SUCCESS,
+                            pipeline_id=job.pipeline_id,
+                            job_id=job.id,
+                            message=f"Pipeline execution completed successfully",
+                            level=AlertLevel.SUCCESS
+                        )
                 except Exception as alert_err:
                     logger.error(f"Failed to create success alerts: {alert_err}")
 
@@ -187,7 +205,10 @@ def execute_pipeline_task(self, job_id: int) -> str:
 
                 logger.info(
                     "Pipeline execution completed",
-                    extra={"job_id": job_id, "duration_seconds": job.duration_seconds},
+                    extra={
+                        "job_id": job_id,
+                        "duration_seconds": (job.execution_time_ms / 1000.0 if job.execution_time_ms else 0.0),
+                    },
                 )
 
                 return f"Job ID {job_id} completed successfully"
@@ -224,6 +245,17 @@ def execute_pipeline_task(self, job_id: int) -> str:
                     },
                     exc_info=True,
                 )
+
+                # Check if the job actually succeeded (e.g. error happened during post-processing logs/alerts)
+                # We open a new session to check the committed state
+                try:
+                    with session_scope() as check_session:
+                        current_job = check_session.query(Job).filter(Job.id == job_id).first()
+                        if current_job and current_job.status == JobStatus.SUCCESS:
+                            logger.error(f"Job {job_id} succeeded but post-processing failed: {e}")
+                            return f"Job {job_id} completed successfully (with post-processing errors)"
+                except Exception as check_err:
+                    logger.error(f"Failed to verify job status after error: {check_err}")
 
                 # At this point, runner.run should have already marked pipeline_run as FAILED and flushed.
                 # We just need to handle the job status and commit/retry.
@@ -410,14 +442,15 @@ def _mark_job_failed(
         from app.services.alert_service import AlertService
         from app.models.enums import AlertType, AlertLevel
         
-        AlertService.trigger_alerts(
-            session,
-            alert_type=AlertType.JOB_FAILURE,
-            pipeline_id=job.pipeline_id,
-            job_id=job.id,
-            message=error_message,
-            level=AlertLevel.ERROR
-        )
+        with session_scope() as alert_session:
+            AlertService.trigger_alerts(
+                alert_session,
+                alert_type=AlertType.JOB_FAILURE,
+                pipeline_id=job.pipeline_id,
+                job_id=job.id,
+                message=error_message,
+                level=AlertLevel.ERROR
+            )
     except Exception as alert_err:
         logger.error(f"Failed to create alerts: {alert_err}")
 

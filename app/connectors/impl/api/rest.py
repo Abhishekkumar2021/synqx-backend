@@ -3,8 +3,11 @@ import httpx
 import pandas as pd
 from app.connectors.base import BaseConnector
 from app.core.errors import ConfigurationError, ConnectionFailedError, DataTransferError
+from app.core.logging import get_logger
 from pydantic import Field, AnyHttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = get_logger(__name__)
 
 class RestApiConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
@@ -19,11 +22,9 @@ class RestApiConfig(BaseSettings):
     api_key_in: str = Field("header", description="API Key Location: header or query")
     timeout: float = Field(30.0, description="Request timeout in seconds")
 
-
 class RestApiConnector(BaseConnector):
     """
-    Connector for Generic REST APIs.
-    Supports reading from GET endpoints and writing to POST/PUT endpoints.
+    Robust Connector for Generic REST APIs.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -41,18 +42,16 @@ class RestApiConnector(BaseConnector):
         if self.client:
             return
 
-        headers = {}
+        headers = {"Accept": "application/json"}
         auth = None
         params = {}
 
         if self._config_model.auth_type == "basic":
             if self._config_model.auth_username and self._config_model.auth_password:
                 auth = (self._config_model.auth_username, self._config_model.auth_password)
-        
         elif self._config_model.auth_type == "bearer":
              if self._config_model.auth_token:
                 headers["Authorization"] = f"Bearer {self._config_model.auth_token}"
-        
         elif self._config_model.auth_type == "api_key":
             if self._config_model.api_key_value:
                 if self._config_model.api_key_in == "header":
@@ -65,7 +64,8 @@ class RestApiConnector(BaseConnector):
             headers=headers,
             params=params,
             auth=auth,
-            timeout=self._config_model.timeout
+            timeout=self._config_model.timeout,
+            follow_redirects=True
         )
 
     def disconnect(self) -> None:
@@ -75,141 +75,78 @@ class RestApiConnector(BaseConnector):
 
     def test_connection(self) -> bool:
         try:
-            with self.session():
-                # Try root or a health endpoint if we could configure it. 
-                # For generic, we just check if we can make a request to root or just connect.
-                # Since we can't know a valid endpoint for sure, we'll try root '/'
-                # A 404 is technically a successful connection to the server.
-                response = self.client.get("/")
-                return True
+            self.connect()
+            # Try a simple GET to base_url
+            res = self.client.get("/")
+            return res.status_code < 500
         except Exception:
-            # If root fails, maybe it doesn't exist. We can't be 100% sure without a known endpoint.
-            # But usually 'connect' passing means we are good enough config-wise.
             return False
 
     def discover_assets(
         self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
     ) -> List[Dict[str, Any]]:
-        # REST APIs don't typically expose "tables", but we can list configured endpoints if we had a schema.
-        # For now, we return a dummy "endpoint" asset or user provided endpoints.
-        return [{"name": "endpoint", "type": "api"}]
+        # For REST, assets are typically endpoints. 
+        # In a real system, these would be configured or discovered via OpenAPI/Swagger.
+        return [{"name": "root", "type": "endpoint", "path": "/"}]
 
-    def infer_schema(
-        self,
-        asset: str,
-        sample_size: int = 1000,
-        mode: str = "auto",
-        **kwargs,
-    ) -> Dict[str, Any]:
-        
+    def infer_schema(self, asset: str, **kwargs) -> Dict[str, Any]:
         self.connect()
         try:
-            # Asset is the endpoint path, e.g., "/users"
-            # We assume it returns a JSON list or object.
-            response = self.client.get(asset)
-            response.raise_for_status()
-            data = response.json()
+            res = self.client.get(asset)
+            res.raise_for_status()
+            data = res.json()
+            records = self._normalize(data)
+            if not records: return {"asset": asset, "columns": []}
             
-            records = self._normalize_response(data)
-            
-            if not records:
-                 return {"asset": asset, "columns": [], "format": "json"}
-
-            df = pd.DataFrame(records[:sample_size])
-             
-            columns = [
-                {"name": col, "type": str(dtype)}
-                for col, dtype in df.dtypes.items()
-            ]
+            df = pd.DataFrame(records[:10])
             return {
                 "asset": asset,
-                "columns": columns,
-                "format": "json"
+                "columns": [{"name": col, "type": str(dtype)} for col, dtype in df.dtypes.items()]
             }
         except Exception as e:
-            # Fallback
-             return {"asset": asset, "columns": [], "error": str(e)}
+            raise DataTransferError(f"REST schema inference failed: {e}")
 
     def read_batch(
-        self,
-        asset: str,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-        **kwargs,
+        self, asset: str, limit: Optional[int] = None, offset: Optional[int] = None, **kwargs
     ) -> Iterator[pd.DataFrame]:
-        
         self.connect()
-
-        # Handle pagination params (generic)
         params = kwargs.get("params", {}).copy()
-        if limit is not None:
-            params["limit"] = limit
-        if offset is not None:
-            params["offset"] = offset
+        if limit: params["limit"] = limit
+        if offset: params["offset"] = offset
 
         try:
-            # asset is the endpoint, e.g., "/users"
-            response = self.client.get(asset, params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            records = self._normalize_response(data)
-
+            res = self.client.get(asset, params=params)
+            res.raise_for_status()
+            data = res.json()
+            records = self._normalize(data)
             if records:
-                df = pd.DataFrame(records)
-                yield df
-            else:
-                yield pd.DataFrame()
-                
+                yield pd.DataFrame(records)
         except Exception as e:
-            raise DataTransferError(f"Failed to read from REST API: {e}")
+            raise DataTransferError(f"REST API read failed: {e}")
 
-    def _normalize_response(self, data: Any) -> List[Dict[str, Any]]:
+    def _normalize(self, data: Any) -> List[Dict[str, Any]]:
+        if isinstance(data, list): return data
         if isinstance(data, dict):
-            # Try to find the list wrapper if it exists (e.g. {"data": [...]})
-            if "data" in data and isinstance(data["data"], list):
-                return data["data"]
-            elif "items" in data and isinstance(data["items"], list):
-                return data["items"]
-            elif "results" in data and isinstance(data["results"], list):
-                return data["results"]
-            else:
-                return [data] # Single object
-        elif isinstance(data, list):
-            return data
-        else:
-            return []
+            for key in ['data', 'items', 'results', 'records']:
+                if key in data and isinstance(data[key], list):
+                    return data[key]
+            return [data]
+        return []
 
     def write_batch(
-        self,
-        data: Union[pd.DataFrame, Iterator[pd.DataFrame]],
-        asset: str,
-        mode: str = "append",
-        **kwargs,
+        self, data: Union[pd.DataFrame, Iterator[pd.DataFrame]], asset: str, mode: str = "append", **kwargs
     ) -> int:
-        
         self.connect()
-        count = 0
-        method = "PUT" if mode == "replace" else "POST"
+        total = 0
+        if isinstance(data, pd.DataFrame): data_iter = [data]
+        else: data_iter = data
 
-        if isinstance(data, pd.DataFrame):
-            iterator = [data]
-        else:
-            iterator = data
-
-        for df in iterator:
-            records = df.to_dict(orient="records")
-            for record in records:
+        for df in data_iter:
+            for record in df.to_dict(orient="records"):
                 try:
-                    if method == "POST":
-                        response = self.client.post(asset, json=record)
-                    else:
-                        response = self.client.put(asset, json=record)
-                    
-                    response.raise_for_status()
-                    count += 1
+                    res = self.client.post(asset, json=record)
+                    res.raise_for_status()
+                    total += 1
                 except Exception as e:
-                    # Depending on policy, we might want to stop or log errors
-                    raise DataTransferError(f"Failed to write record to {asset}: {e}")
-        
-        return count
+                    logger.error(f"Failed to write record: {e}")
+        return total

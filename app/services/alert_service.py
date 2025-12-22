@@ -35,11 +35,13 @@ class AlertService:
             configs = db.query(models.AlertConfig).filter(
                 models.AlertConfig.enabled == True,
                 models.AlertConfig.alert_type == alert_type,
-                models.AlertConfig.user_id == pipeline.owner_id
+                models.AlertConfig.user_id == pipeline.user_id
             ).all()
 
             alerts = []
             redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+
+            generated_in_app = False
 
             for config in configs:
                 # Check cooldown
@@ -48,6 +50,9 @@ class AlertService:
                     if (datetime.now(timezone.utc) - config.last_triggered_at.replace(tzinfo=timezone.utc)).total_seconds() < cooldown_seconds:
                         logger.info(f"Alert config {config.id} in cooldown")
                         continue
+
+                if config.delivery_method == AlertDeliveryMethod.IN_APP:
+                    generated_in_app = True
 
                 alert_msg = message or f"Alert triggered for pipeline {pipeline.name}"
                 
@@ -79,9 +84,50 @@ class AlertService:
                         "pipeline_id": alert.pipeline_id,
                         "created_at": datetime.now(timezone.utc).isoformat()
                     }
-                    redis_client.publish(f"user_notifications:{pipeline.owner_id}", json.dumps(notification_payload))
+                    redis_client.publish(f"user_notifications:{pipeline.user_id}", json.dumps(notification_payload))
                 except Exception as broadcast_err:
                     logger.error(f"Failed to broadcast notification: {broadcast_err}")
+
+            # Ensure default In-App notifications for Job Started/Success/Failure
+            if not generated_in_app and alert_type in (AlertType.JOB_STARTED, AlertType.JOB_SUCCESS, AlertType.JOB_FAILURE):
+                default_msg = message
+                if not default_msg:
+                    if alert_type == AlertType.JOB_STARTED:
+                        status_str = "started"
+                    elif alert_type == AlertType.JOB_SUCCESS:
+                        status_str = "succeeded"
+                    else:
+                        status_str = "failed"
+                    default_msg = f"Pipeline '{pipeline.name}' execution {status_str}."
+
+                alert = models.Alert(
+                    alert_config_id=None,
+                    pipeline_id=pipeline_id,
+                    job_id=job_id,
+                    message=default_msg,
+                    level=level,
+                    status=AlertStatus.PENDING,
+                    delivery_method=AlertDeliveryMethod.IN_APP,
+                    recipient=str(pipeline.user_id)
+                )
+                db.add(alert)
+                db.flush()
+                alerts.append(alert)
+
+                # Broadcast default alert
+                try:
+                    notification_payload = {
+                        "id": alert.id,
+                        "type": "new_alert",
+                        "message": alert.message,
+                        "level": alert.level.value,
+                        "job_id": alert.job_id,
+                        "pipeline_id": alert.pipeline_id,
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    }
+                    redis_client.publish(f"user_notifications:{pipeline.user_id}", json.dumps(notification_payload))
+                except Exception as broadcast_err:
+                    logger.error(f"Failed to broadcast default notification: {broadcast_err}")
 
             db.commit()
             return alerts

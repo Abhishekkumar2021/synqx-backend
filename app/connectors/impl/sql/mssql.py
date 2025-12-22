@@ -3,24 +3,25 @@ from app.connectors.impl.sql.base import SQLConnector
 from app.connectors.impl.sql.postgres import PostgresConfig
 from app.core.errors import ConfigurationError
 
-class MySQLConfig(PostgresConfig):
-    port: int = 3306
+class MSSQLConfig(PostgresConfig):
+    port: int = 1433
+    db_schema: str = "dbo"
 
-class MySQLConnector(SQLConnector):
+class MSSQLConnector(SQLConnector):
     """
-    Robust MySQL Connector using SQLAlchemy.
+    Robust MSSQL Connector using SQLAlchemy and pymssql.
     """
 
     def validate_config(self) -> None:
         try:
-            MySQLConfig.model_validate(self.config)
+            MSSQLConfig.model_validate(self.config)
         except Exception as e:
-            raise ConfigurationError(f"Invalid MySQL configuration: {e}")
+            raise ConfigurationError(f"Invalid MSSQL configuration: {e}")
 
     def _sqlalchemy_url(self) -> str:
-        conf = MySQLConfig.model_validate(self.config)
+        conf = MSSQLConfig.model_validate(self.config)
         return (
-            f"mysql+pymysql://"
+            f"mssql+pymssql://"
             f"{conf.username}:{conf.password}"
             f"@{conf.host}:{conf.port}/"
             f"{conf.database}"

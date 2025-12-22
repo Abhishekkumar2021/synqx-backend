@@ -267,6 +267,7 @@ class PipelineRead(PipelineBase):
 
 class PipelineDetailRead(PipelineRead):
     published_version: Optional[PipelineVersionRead] = None
+    latest_version: Optional[PipelineVersionRead] = None
     versions: List[PipelineVersionSummary] = Field(default_factory=list)
 
 

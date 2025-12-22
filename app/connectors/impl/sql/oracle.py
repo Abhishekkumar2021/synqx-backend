@@ -3,24 +3,24 @@ from app.connectors.impl.sql.base import SQLConnector
 from app.connectors.impl.sql.postgres import PostgresConfig
 from app.core.errors import ConfigurationError
 
-class MySQLConfig(PostgresConfig):
-    port: int = 3306
+class OracleConfig(PostgresConfig):
+    port: int = 1521
 
-class MySQLConnector(SQLConnector):
+class OracleConnector(SQLConnector):
     """
-    Robust MySQL Connector using SQLAlchemy.
+    Robust Oracle Connector using SQLAlchemy and oracledb.
     """
 
     def validate_config(self) -> None:
         try:
-            MySQLConfig.model_validate(self.config)
+            OracleConfig.model_validate(self.config)
         except Exception as e:
-            raise ConfigurationError(f"Invalid MySQL configuration: {e}")
+            raise ConfigurationError(f"Invalid Oracle configuration: {e}")
 
     def _sqlalchemy_url(self) -> str:
-        conf = MySQLConfig.model_validate(self.config)
+        conf = OracleConfig.model_validate(self.config)
         return (
-            f"mysql+pymysql://"
+            f"oracle+oracledb://"
             f"{conf.username}:{conf.password}"
             f"@{conf.host}:{conf.port}/"
             f"{conf.database}"

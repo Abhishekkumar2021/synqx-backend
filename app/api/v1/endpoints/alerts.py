@@ -1,6 +1,7 @@
 from typing import List, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import or_, and_
 
 from app import models
 from app.schemas import alert as alert_schema
@@ -76,10 +77,17 @@ def list_alerts(
     List individual alerts.
     """
     # Alerts are linked to alert_configs which are linked to users
-    return db.query(models.Alert).join(
+    # OR they are system alerts (config_id=None) addressed to the user via recipient field
+    return db.query(models.Alert).outerjoin(
         models.AlertConfig, models.Alert.alert_config_id == models.AlertConfig.id
     ).filter(
-        models.AlertConfig.user_id == current_user.id
+        or_(
+            models.AlertConfig.user_id == current_user.id,
+            and_(
+                models.Alert.alert_config_id.is_(None),
+                models.Alert.recipient == str(current_user.id)
+            )
+        )
     ).order_by(models.Alert.created_at.desc()).offset(skip).limit(limit).all()
 
 @router.patch("/history/{alert_id}", response_model=alert_schema.AlertRead)
@@ -93,11 +101,17 @@ def update_alert_status(
     """
     Update alert status (e.g., acknowledge).
     """
-    alert = db.query(models.Alert).join(
+    alert = db.query(models.Alert).outerjoin(
         models.AlertConfig, models.Alert.alert_config_id == models.AlertConfig.id
     ).filter(
         models.Alert.id == alert_id,
-        models.AlertConfig.user_id == current_user.id
+        or_(
+            models.AlertConfig.user_id == current_user.id,
+            and_(
+                models.Alert.alert_config_id.is_(None),
+                models.Alert.recipient == str(current_user.id)
+            )
+        )
     ).first()
     
     if not alert:

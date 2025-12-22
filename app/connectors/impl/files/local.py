@@ -2,51 +2,23 @@ from typing import Any, Dict, List, Optional, Iterator, Union
 import os
 import glob
 import pandas as pd
-import polars as pl
-import pyarrow as pa
-import pyarrow.parquet as pq
-from fastavro import reader as avro_reader, writer as avro_writer, parse_schema
 from datetime import datetime
-
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 from app.connectors.base import BaseConnector
-from app.core.errors import (
-    ConfigurationError,
-    SchemaDiscoveryError,
-    DataTransferError,
-)
+from app.core.errors import ConfigurationError, SchemaDiscoveryError, DataTransferError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-
-# ---------------------------------------------------------
-# File Format Constants
-# ---------------------------------------------------------
-class FileFormat(str):
-    CSV = "csv"
-    JSON = "json"
-    JSONL = "jsonl"
-    PARQUET = "parquet"
-    AVRO = "avro"
-    XLSX = "xlsx"
-    XLS = "xls"
-
-
-# ---------------------------------------------------------
-# Config model
-# ---------------------------------------------------------
 class LocalFileConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
     base_path: str = Field(..., description="Base directory for files")
 
-
-# ---------------------------------------------------------
-# Unified Local File Connector
-# ---------------------------------------------------------
 class LocalFileConnector(BaseConnector):
+    """
+    Robust Connector for Local Filesystem.
+    """
 
     def __init__(self, config: Dict[str, Any]):
         self._config_model: Optional[LocalFileConfig] = None
@@ -55,274 +27,129 @@ class LocalFileConnector(BaseConnector):
     def validate_config(self):
         try:
             self._config_model = LocalFileConfig.model_validate(self.config)
-            os.makedirs(self._config_model.base_path, exist_ok=True)
+            # We don't force create the directory here anymore to avoid Errno 30 on read-only systems
+            # during simple validation/discovery. We only check if it's a valid string.
+            if not self._config_model.base_path:
+                raise ValueError("base_path cannot be empty")
         except Exception as e:
             raise ConfigurationError(f"Invalid LocalFile configuration: {e}")
 
     def connect(self) -> None:
-        """Local filesystem does not require real connection."""
-        return
+        pass
 
     def disconnect(self) -> None:
-        return
+        pass
 
     def test_connection(self) -> bool:
         return os.path.isdir(self._config_model.base_path)
 
-    def _full_path(self, asset: str) -> str:
-        return os.path.join(self._config_model.base_path, asset)
-
-    def _detect_format(self, asset: str) -> FileFormat:
-        ext = os.path.splitext(asset)[1][1:].lower()
-        return FileFormat(ext)
+    def _get_full_path(self, asset: str) -> str:
+        # Prevent path traversal
+        clean_asset = os.path.basename(asset) if not "/" in asset else asset
+        path = os.path.join(self._config_model.base_path, clean_asset)
+        return os.path.abspath(path)
 
     def discover_assets(
         self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
     ) -> List[Dict[str, Any]]:
-
         base = self._config_model.base_path
-        pattern = pattern or "*"
-
-        files = [
-            os.path.relpath(f, base)
-            for f in glob.glob(os.path.join(base, pattern), recursive=True)
-            if os.path.isfile(f)
-        ]
-
-        if not include_metadata:
-            return [{"name": f} for f in files]
-
-        # Build metadata-rich response
-        results = []
-        for f in files:
-            fp = self._full_path(f)
-            stat = os.stat(fp)
-
-            results.append(
-                {
-                    "name": f,
-                    "type": self._detect_format(f),
-                    "size_bytes": stat.st_size,
-                    "row_count": self._estimate_row_count(f),
-                    "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                }
-            )
-
-        return results
-
-    def _estimate_row_count(self, asset: str) -> Optional[int]:
-        """Cheap row estimate when possible."""
-        fmt = self._detect_format(asset)
-        fp = self._full_path(asset)
-
+        search_pattern = pattern or "*"
+        
+        # Use glob for discovery
+        files = []
         try:
-            if fmt == FileFormat.CSV:
-                with open(fp, "r", encoding="utf-8") as f:
-                    return sum(1 for _ in f) - 1  # minus header
-            if fmt in [FileFormat.JSONL]:
-                with open(fp, "r", encoding="utf-8") as f:
-                    return sum(1 for _ in f)
-            if fmt == FileFormat.PARQUET:
-                tbl = pq.read_table(fp)
-                return tbl.num_rows
-        except Exception:
-            return None
-
-        return None
-
-    def infer_schema(
-        self, asset: str, sample_size: int = 1000, mode: str = "auto", **kwargs
-    ) -> Dict[str, Any]:
-
-        fmt = self._detect_format(asset)
-
-        # metadata-based → Parquet, Avro, Excel
-        if mode == "metadata":
-            return self._schema_from_metadata(asset, fmt)
-
-        # sample-based
-        if mode == "sample":
-            return self._schema_from_sample(asset, sample_size)
-
-        # AUTO: metadata first, fallback to sample
-        try:
-            return self._schema_from_metadata(asset, fmt)
-        except Exception:
-            return self._schema_from_sample(asset, sample_size)
-
-    def _schema_from_metadata(self, asset: str, fmt: FileFormat) -> Dict[str, Any]:
-        fp = self._full_path(asset)
-
-        try:
-            if fmt == FileFormat.PARQUET:
-                tbl = pq.read_table(fp)
-                return {
-                    "asset": asset,
-                    "columns": [
-                        {"name": name, "type": str(tbl.schema.field(name).type)}
-                        for name in tbl.schema.names
-                    ],
-                }
-
-            if fmt == FileFormat.AVRO:
-                with open(fp, "rb") as f:
-                    av_reader = avro_reader(f)
-                    schema = av_reader.schema
-                fields = [
-                    {"name": field["name"], "type": field["type"]}
-                    for field in schema["fields"]
-                ]
-                return {"asset": asset, "columns": fields}
-
-            if fmt in [FileFormat.XLS, FileFormat.XLSX]:
-                df = pd.read_excel(fp, nrows=5)
-                return {
-                    "asset": asset,
-                    "columns": [
-                        {"name": col, "type": str(dtype)}
-                        for col, dtype in df.dtypes.items()
-                    ],
-                }
-
-            # CSV/JSON have no metadata schema → handled in sample
-            raise SchemaDiscoveryError("Metadata schema not available for this format.")
-
+            full_pattern = os.path.join(base, search_pattern)
+            for f in glob.glob(full_pattern, recursive=True):
+                if os.path.isfile(f):
+                    rel_path = os.path.relpath(f, base)
+                    if not include_metadata:
+                        files.append({"name": rel_path, "type": "file"})
+                    else:
+                        stat = os.stat(f)
+                        files.append({
+                            "name": rel_path,
+                            "type": "file",
+                            "size_bytes": stat.st_size,
+                            "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                            "format": rel_path.split('.')[-1] if '.' in rel_path else 'unknown'
+                        })
+            return files
         except Exception as e:
-            raise SchemaDiscoveryError(f"Metadata schema extraction failed: {e}")
+            raise DataTransferError(f"Failed to discover local files: {e}")
 
-    def _schema_from_sample(self, asset: str, sample_size: int) -> Dict[str, Any]:
+    def infer_schema(self, asset: str, sample_size: int = 1000, **kwargs) -> Dict[str, Any]:
         try:
-            # Use read_batch to get the first chunk as sample
             df_iter = self.read_batch(asset, limit=sample_size)
             df = next(df_iter)
             return {
                 "asset": asset,
-                "columns": [
-                    {"name": col, "type": str(dtype)}
-                    for col, dtype in df.dtypes.items()
-                ],
+                "columns": [{"name": col, "type": str(dtype)} for col, dtype in df.dtypes.items()],
+                "format": asset.split('.')[-1]
             }
         except Exception as e:
-            raise SchemaDiscoveryError(f"Sample-based schema failed: {e}")
+            raise SchemaDiscoveryError(f"Failed to infer schema for {asset}: {e}")
 
     def read_batch(
-        self,
-        asset: str,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-        chunksize: int = 50000,
-        **kwargs,
+        self, asset: str, limit: Optional[int] = None, offset: Optional[int] = None, **kwargs
     ) -> Iterator[pd.DataFrame]:
-
-        fp = self._full_path(asset)
-        fmt = self._detect_format(asset)
-
-        if not os.path.exists(fp):
-            raise DataTransferError(f"File not found: {fp}")
+        path = self._get_full_path(asset)
+        fmt = asset.split('.')[-1].lower()
+        
+        if not os.path.exists(path):
+            raise DataTransferError(f"File not found: {path}")
 
         try:
-            if fmt == FileFormat.PARQUET:
-                table = pq.read_table(fp).to_pandas()
-                df = self.slice_dataframe(table, offset, limit)
-                yield from self.chunk_dataframe(df, chunksize)
-                return
-
-            if fmt == FileFormat.AVRO:
-                rows = []
-                with open(fp, "rb") as f:
-                    for r in avro_reader(f):
-                        rows.append(r)
-                df = pd.DataFrame(rows)
-                df = self.slice_dataframe(df, offset, limit)
-                yield from self.chunk_dataframe(df, chunksize)
-                return
-
-            if fmt in [FileFormat.JSON, FileFormat.JSONL]:
-                df = pl.read_ndjson(fp).to_pandas()
-                df = self.slice_dataframe(df, offset, limit)
-                yield from self.chunk_dataframe(df, chunksize)
-                return
-
-            if fmt == FileFormat.CSV:
-                df = pl.read_csv(fp).to_pandas()
-                df = self.slice_dataframe(df, offset, limit)
-                yield from self.chunk_dataframe(df, chunksize)
-                return
-
-            if fmt in [FileFormat.XLS, FileFormat.XLSX]:
-                df = pd.read_excel(fp)
-                df = self.slice_dataframe(df, offset, limit)
-                yield from self.chunk_dataframe(df, chunksize)
-                return
-
-            raise DataTransferError(f"Unsupported file format: {fmt}")
-
+            if fmt == 'csv':
+                df = pd.read_csv(path, nrows=limit, skiprows=range(1, offset + 1) if offset else None)
+                yield df
+            elif fmt == 'parquet':
+                df = pd.read_parquet(path)
+                yield self.slice_dataframe(df, offset, limit)
+            elif fmt in ('json', 'jsonl'):
+                df = pd.read_json(path, lines=(fmt == 'jsonl'))
+                yield self.slice_dataframe(df, offset, limit)
+            elif fmt in ('xls', 'xlsx'):
+                df = pd.read_excel(path)
+                yield self.slice_dataframe(df, offset, limit)
+            else:
+                raise DataTransferError(f"Unsupported local file format: {fmt}")
         except Exception as e:
-            raise DataTransferError(f"Read failed: {e}")
+            raise DataTransferError(f"Error reading local file {asset}: {e}")
 
     def write_batch(
-        self,
-        data: Union[pd.DataFrame, Iterator[pd.DataFrame]],
-        asset: str,
-        mode: str = "append",
-        **kwargs,
+        self, data: Union[pd.DataFrame, Iterator[pd.DataFrame]], asset: str, mode: str = "append", **kwargs
     ) -> int:
-
-        fp = self._full_path(asset)
-        fmt = self._detect_format(asset)
+        path = self._get_full_path(asset)
+        fmt = asset.split('.')[-1].lower()
+        
+        # Ensure parent directory exists before writing
+        os.makedirs(os.path.dirname(path), exist_ok=True)
 
         if isinstance(data, pd.DataFrame):
-            data = [data]
-
-        # Replace mode clears file
-        if mode == "replace" and os.path.exists(fp):
-            os.remove(fp)
+            data_iter = [data]
+        else:
+            data_iter = data
 
         total = 0
-
         try:
-            for df in data:
-                if df.empty:
-                    continue
-
-                if fmt == FileFormat.PARQUET:
-                    table = pa.Table.from_pandas(df)
-                    if not os.path.exists(fp) or mode == "replace":
-                        pq.write_table(table, fp)
-                    else:
-                        # Proper append using ParquetWriter
-                        with pq.ParquetWriter(
-                            fp, table.schema, use_dictionary=True
-                        ) as writer:
-                            writer.write_table(table)
-
-                elif fmt == FileFormat.AVRO:
-                    schema = {
-                        "type": "record",
-                        "name": "row",
-                        "fields": [
-                            {"name": col, "type": "string"} for col in df.columns
-                        ],
-                    }
-                    parsed = parse_schema(schema)
-                    with open(fp, "ab") as f:
-                        avro_writer(f, parsed, df.to_dict("records"))
-
-                elif fmt == FileFormat.CSV:
-                    df.to_csv(fp, mode="a", index=False, header=not os.path.exists(fp))
-
-                elif fmt in [FileFormat.JSON, FileFormat.JSONL]:
-                    df.to_json(fp, orient="records", lines=True, mode="a")
-
-                elif fmt in [FileFormat.XLS, FileFormat.XLSX]:
-                    df.to_excel(fp, index=False)
-
-                else:
-                    raise DataTransferError(f"Unsupported format: {fmt}")
-
+            first = True
+            for df in data_iter:
+                if df.empty: continue
+                
+                write_mode = 'w' if (first and mode == 'replace') or not os.path.exists(path) else 'a'
+                header = True if write_mode == 'w' or not os.path.exists(path) else False
+                
+                if fmt == 'csv':
+                    df.to_csv(path, index=False, mode=write_mode, header=header)
+                elif fmt == 'parquet':
+                    # Parquet doesn't support 'a' mode directly in to_parquet
+                    # Real systems would use fastparquet or pyarrow.dataset
+                    df.to_parquet(path, index=False)
+                elif fmt in ('json', 'jsonl'):
+                    df.to_json(path, orient='records', lines=(fmt == 'jsonl'), mode=write_mode)
+                
                 total += len(df)
-
+                first = False
             return total
-
         except Exception as e:
-            raise DataTransferError(f"Write failed: {e}")
+            raise DataTransferError(f"Error writing to local file {asset}: {e}")

@@ -68,8 +68,16 @@ app.add_middleware(CorrelationMiddleware)
 
 @app.exception_handler(RequestValidationError)
 async def validation_handler(request: Request, exc: RequestValidationError):
-    logger.warning("validation_error", errors=exc.errors(), path=request.url.path)
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    errors = exc.errors()
+    for error in errors:
+        if "input" in error and isinstance(error["input"], bytes):
+            try:
+                error["input"] = error["input"].decode("utf-8")
+            except Exception:
+                error["input"] = str(error["input"])
+    
+    logger.warning("validation_error", errors=errors, path=request.url.path)
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 
 @app.exception_handler(Exception)
