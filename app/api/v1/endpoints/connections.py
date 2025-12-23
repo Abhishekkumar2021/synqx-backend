@@ -25,6 +25,8 @@ from app.schemas.connection import (
     AssetSampleRead,
     ConnectionImpactRead,
     ConnectionUsageStatsRead,
+    AssetBulkCreate,
+    AssetBulkCreateResponse,
 )
 from app.services.connection_service import ConnectionService
 from app.services.vault_service import VaultService
@@ -409,6 +411,44 @@ def create_asset(
             detail={
                 "error": "Internal server error",
                 "message": "Failed to create asset",
+            },
+        )
+
+
+@router.post(
+    "/{connection_id}/assets/bulk-create",
+    response_model=AssetBulkCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Bulk Create Assets",
+    description="Create multiple assets for this connection in one request.",
+)
+def bulk_create_assets(
+    connection_id: int,
+    bulk_create_request: AssetBulkCreate,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        service = ConnectionService(db)
+        result = service.bulk_create_assets(
+            connection_id=connection_id,
+            assets_to_create=bulk_create_request.assets,
+            user_id=current_user.id,
+        )
+        return AssetBulkCreateResponse(**result)
+    except AppError as e:
+        logger.error(f"Error during bulk asset creation for connection {connection_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during bulk asset creation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "An unexpected error occurred during bulk asset creation.",
             },
         )
 

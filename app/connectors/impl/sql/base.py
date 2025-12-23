@@ -112,7 +112,7 @@ class SQLConnector(BaseConnector):
 
     def _get_row_count(self, table: str, schema: Optional[str] = None) -> Optional[int]:
         try:
-            table_ref = f'"{schema}"."{table}"' if schema else f'"{table}"'
+            table_ref = f'{schema}.{table}' if schema else f'{table}'
             query = text(f"SELECT COUNT(*) FROM {table_ref}")
             return int(self._connection.execute(query).scalar())
         except Exception:
@@ -170,7 +170,7 @@ class SQLConnector(BaseConnector):
     ) -> Iterator[pd.DataFrame]:
         self.connect()
         schema = self.config.get("db_schema") or self.config.get("schema")
-        table_ref = f'"{schema}"."{asset}"' if schema else f'"{asset}"'
+        table_ref = f'{schema}.{asset}' if schema else f'{asset}'
         
         query = f"SELECT * FROM {table_ref}"
         if limit: query += f" LIMIT {limit}"

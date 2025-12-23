@@ -154,12 +154,13 @@ class PipelineRunner:
 
             records_in = 0
             records_out = 0
+            bytes_processed = 0
 
             # Determine data source
             if source_connector and source_asset:
                 # Node reads from a source connector
                 def src_iter():
-                    nonlocal records_in
+                    nonlocal records_in, bytes_processed
                     read_params = {"asset": source_asset.name}
                     if watermark and watermark.last_value:
                         read_params["incremental_filter"] = watermark.last_value
@@ -167,6 +168,7 @@ class PipelineRunner:
                     with source_connector.session() as conn:
                         for chunk in conn.read_batch(**read_params):
                             records_in += len(chunk)
+                            bytes_processed += int(chunk.memory_usage(deep=True).sum())
                             yield chunk
 
                 data_iter = src_iter()
@@ -187,6 +189,7 @@ class PipelineRunner:
                         )
                         for chunk in materialized_inputs[upstream_id]:
                             records_in += len(chunk)
+                            bytes_processed += int(chunk.memory_usage(deep=True).sum())
 
                     # Create transform with multiple inputs
                     transform = TransformFactory.get_transform(
@@ -200,9 +203,10 @@ class PipelineRunner:
                     upstream_iter = next(iter(input_data.values()))
 
                     def upstream_iter_wrapper():
-                        nonlocal records_in
+                        nonlocal records_in, bytes_processed
                         for chunk in upstream_iter:
                             records_in += len(chunk)
+                            bytes_processed += int(chunk.memory_usage(deep=True).sum())
                             yield chunk
 
                     data_iter = upstream_iter_wrapper()
@@ -246,9 +250,21 @@ class PipelineRunner:
                 iterator_to_count = transformed
 
                 def counting_iter():
-                    nonlocal records_out
+                    nonlocal records_out, bytes_processed
+                    # If bytes_processed was already counted in src/upstream, we might double count if we count here again for pass-through?
+                    # But transformed data might have different size.
+                    # Usually we want bytes *processed* by this step.
+                    # If it's a transform, input bytes are counted in input loop. Output bytes?
+                    # Let's count output bytes here.
+                    
                     for chunk in iterator_to_count:
                         records_out += len(chunk)
+                        # We accumulate bytes processed as input bytes + output bytes? 
+                        # Or just input bytes? usually bytes processed means input volume.
+                        # But for a generator, we only know input size when we iterate.
+                        # The `upstream_iter_wrapper` counts input bytes.
+                        # If we have a transform, it consumes input (counting input bytes) and yields output.
+                        # So `bytes_processed` will contain input bytes.
                         yield chunk
 
                 if transformed is not None:
@@ -257,6 +273,7 @@ class PipelineRunner:
             # Update step run with results
             step_run.records_in = records_in
             step_run.records_out = records_out
+            step_run.bytes_processed = bytes_processed
             step_run.status = OperatorRunStatus.SUCCESS
             step_run.completed_at = datetime.now(timezone.utc)
             if step_run.started_at:
@@ -393,6 +410,12 @@ class PipelineRunner:
             # If all nodes completed successfully, mark pipeline_run as completed
             pipeline_run.status = PipelineRunStatus.COMPLETED
             pipeline_run.completed_at = datetime.now(timezone.utc)
+            
+            # Aggregate stats from step runs
+            pipeline_run.total_extracted = sum(step.records_in for step in pipeline_run.step_runs if step.operator_type == OperatorType.EXTRACT)
+            pipeline_run.total_loaded = sum(step.records_out for step in pipeline_run.step_runs if step.operator_type == OperatorType.LOAD)
+            pipeline_run.bytes_processed = sum(step.bytes_processed for step in pipeline_run.step_runs)
+            
             if pipeline_run.started_at:
                 start_dt = pipeline_run.started_at
                 if start_dt.tzinfo is None:

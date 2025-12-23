@@ -148,6 +148,23 @@ class AssetUpdate(BaseModel):
         return v.strip() if v else v
 
 
+class AssetBulkCreateItem(AssetBase):
+    # Most fields are inherited from AssetBase.
+    # We can override fields if needed, for example, to make them optional for bulk creation
+    # For now, we'll rely on the defaults in AssetBase and require a name.
+    pass
+
+class AssetBulkCreate(BaseModel):
+    assets: List[AssetBulkCreateItem] = Field(..., min_length=1)
+
+
+class AssetBulkCreateResponse(BaseModel):
+    successful_creates: int
+    failed_creates: int
+    total_requested: int
+    failures: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class AssetRead(AssetBase):
     id: int
     connection_id: int

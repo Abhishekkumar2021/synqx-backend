@@ -353,30 +353,14 @@ class ConnectionService:
             raise AppError(f"Asset {asset_id} not found")
 
         try:
-            if asset_update.name is not None:
-                asset.name = asset_update.name
-            if asset_update.asset_type is not None:
-                asset.asset_type = asset_update.asset_type
-            if asset_update.fully_qualified_name is not None:
-                asset.fully_qualified_name = asset_update.fully_qualified_name
-            if asset_update.is_source is not None:
-                asset.is_source = asset_update.is_source
-            if asset_update.is_destination is not None:
-                asset.is_destination = asset_update.is_destination
-            if asset_update.is_incremental_capable is not None:
-                asset.is_incremental_capable = asset_update.is_incremental_capable
-            if asset_update.description is not None:
-                asset.description = asset_update.description
-            if asset_update.config is not None:
-                asset.config = asset_update.config
-            if asset_update.tags is not None:
-                asset.tags = asset_update.tags
-            if asset_update.schema_metadata is not None:
-                asset.schema_metadata = asset_update.schema_metadata
-
+            update_data = asset_update.model_dump(exclude_unset=True)
+            for key, value in update_data.items():
+                setattr(asset, key, value)
+            
             asset.updated_at = datetime.now(timezone.utc)
             if user_id:
                 asset.updated_by = str(user_id)
+                
             self.db_session.commit()
             self.db_session.refresh(asset)
             return asset
@@ -386,6 +370,68 @@ class ConnectionService:
         except Exception as e:
             self.db_session.rollback()
             raise AppError(f"Failed to update asset: {str(e)}")
+
+    def bulk_create_assets(
+        self,
+        connection_id: int,
+        assets_to_create: List[Any], # Using Any to avoid circular import with schemas, will be AssetBulkCreateItem
+        user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        connection = self.get_connection(connection_id, user_id=user_id)
+        if not connection:
+            raise AppError(f"Connection {connection_id} not found")
+
+        success_count = 0
+        fail_count = 0
+        failures = []
+        
+        # Get existing asset names for this connection to prevent duplicates efficiently
+        existing_assets = {
+            r[0] for r in self.db_session.query(Asset.name).filter(
+                Asset.connection_id == connection_id
+            ).all()
+        }
+
+        for asset_data in assets_to_create:
+            name = asset_data.name
+            if name in existing_assets:
+                fail_count += 1
+                failures.append({"name": name, "reason": "Asset with this name already exists."})
+                continue
+            
+            try:
+                # Create a complete Asset model from the Pydantic item
+                asset = Asset(
+                    connection_id=connection_id,
+                    **asset_data.model_dump(),
+                    created_by=str(user_id) if user_id else None
+                )
+                self.db_session.add(asset)
+                # Add to set to prevent duplicate additions in the same bulk run
+                existing_assets.add(name)
+                success_count += 1
+            except Exception as e:
+                # This part will now only catch unexpected errors during object creation
+                fail_count += 1
+                failures.append({"name": name, "reason": f"An unexpected error occurred: {str(e)}"})
+
+        if success_count > 0:
+            try:
+                self.db_session.commit()
+            except IntegrityError as e:
+                # This could happen in a race condition if another process created an asset
+                # after our initial check. The robust solution would be to retry, but for now,
+                # we'll just fail the batch. A more advanced implementation would use SAVEPOINTs.
+                self.db_session.rollback()
+                logger.error(f"Bulk asset creation failed on commit: {e}", exc_info=True)
+                raise AppError("Failed to commit assets due to a conflict. Please try again.")
+        
+        return {
+            "successful_creates": success_count,
+            "failed_creates": fail_count,
+            "total_requested": len(assets_to_create),
+            "failures": failures,
+        }
 
     def delete_asset(self, asset_id: int, hard_delete: bool = False, user_id: Optional[int] = None) -> bool:
         asset = self.get_asset(asset_id, user_id=user_id)

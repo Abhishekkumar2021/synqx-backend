@@ -12,6 +12,7 @@ from app.engine.transforms.impl.sort_transform import SortTransform
 from app.engine.transforms.impl.type_cast_transform import TypeCastTransform
 from app.engine.transforms.factory import TransformFactory
 from app.engine.transforms.impl.regex_replace_transform import RegexReplaceTransform
+from app.engine.transforms.impl.code_transform import CodeTransform
 
 TransformFactory.register_transform("pandas_transform", PandasTransform)
 TransformFactory.register_transform("filter", FilterTransform)
@@ -25,3 +26,4 @@ TransformFactory.register_transform("fill_nulls", FillNullsTransform)
 TransformFactory.register_transform("sort", SortTransform)
 TransformFactory.register_transform("type_cast", TypeCastTransform)
 TransformFactory.register_transform("regex_replace", RegexReplaceTransform)
+TransformFactory.register_transform("code", CodeTransform)
