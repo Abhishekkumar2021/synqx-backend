@@ -29,6 +29,7 @@ from app.models.execution import Job, PipelineRun, StepRun, PipelineRunContext, 
 from app.models.monitoring import SchedulerEvent, JobLog, StepLog, AlertConfig, Alert
 from app.models.user import User
 from app.models.api_keys import ApiKey
+from app.models.explorer import QueryHistory
 
 # Export all models for Alembic and easy access
 __all__ = [
@@ -73,4 +74,5 @@ __all__ = [
     "AlertConfig",
     "Alert",
     "ApiKey",
+    "QueryHistory",
 ]
