@@ -154,6 +154,40 @@ class MongoDBConnector(BaseConnector):
         if batch:
             yield pd.DataFrame(batch)
 
+    def execute_query(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        self.connect()
+        import json
+        try:
+            # For MongoDB, we expect a JSON string that might contain 'collection', 'filter', 'projection', etc.
+            # Example: { "collection": "users", "filter": { "age": { "$gt": 20 } } }
+            q_obj = json.loads(query)
+            collection_name = q_obj.get("collection")
+            if not collection_name:
+                raise ValueError("MongoDB query JSON must specify 'collection'.")
+            
+            collection = self._db[collection_name]
+            cursor = collection.find(q_obj.get("filter", {}), q_obj.get("projection"))
+            
+            if offset: cursor = cursor.skip(offset)
+            elif q_obj.get("offset"): cursor = cursor.skip(q_obj.get("offset"))
+            
+            if limit: cursor = cursor.limit(limit)
+            elif q_obj.get("limit"): cursor = cursor.limit(q_obj.get("limit"))
+            
+            results = []
+            for doc in cursor:
+                if '_id' in doc: doc['_id'] = str(doc['_id'])
+                results.append(doc)
+            return results
+        except Exception as e:
+            raise DataTransferError(f"MongoDB query failed: {e}")
+
     def write_batch(
         self, data: Union[pd.DataFrame, Iterator[pd.DataFrame]], asset: str, mode: str = "append", **kwargs
     ) -> int:

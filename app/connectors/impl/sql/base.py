@@ -183,6 +183,29 @@ class SQLConnector(BaseConnector):
         except Exception as e:
             raise DataTransferError(f"Read failed for {asset}: {e}")
 
+    def execute_query(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        self.connect()
+        try:
+            # Strip trailing semicolon if present to avoid syntax errors when appending LIMIT
+            clean_query = query.strip().rstrip(';')
+            
+            final_query = clean_query
+            if limit and "limit" not in clean_query.lower():
+                final_query += f" LIMIT {limit}"
+            if offset and "offset" not in clean_query.lower():
+                final_query += f" OFFSET {offset}"
+            
+            df = pd.read_sql_query(text(final_query), con=self._connection, **kwargs)
+            return df.where(pd.notnull(df), None).to_dict(orient="records")
+        except Exception as e:
+            raise DataTransferError(f"Query execution failed: {e}")
+
     def write_batch(
         self, data: Union[pd.DataFrame, Iterator[pd.DataFrame]], asset: str, mode: str = "append", **kwargs
     ) -> int:

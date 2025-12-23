@@ -92,6 +92,16 @@ class BaseConnector(ABC):
             # For sample data, returning empty list is often safer for UI
             return []
 
+    @abstractmethod
+    def execute_query(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        pass
+
     @staticmethod
     def slice_dataframe(df: pd.DataFrame, offset: Optional[int], limit: Optional[int]):
         if offset:
