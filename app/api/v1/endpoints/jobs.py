@@ -83,6 +83,73 @@ def get_job(
     return JobRead.model_validate(job)
 
 
+@router.get(
+    "/jobs/{job_id}/run",
+    response_model=PipelineRunDetailRead,
+    summary="Get Pipeline Run by Job ID",
+    description="Get the pipeline run associated with a specific job"
+)
+def get_job_run(
+    job_id: int,
+    db: Session = Depends(get_db),
+):
+    service = PipelineRunService(db)
+    # Find pipeline run by job_id
+    from app.models.execution import PipelineRun, Job
+    from app.schemas.pipeline import PipelineVersionRead
+    run = db.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
+    
+    if not run:
+        # If no run record yet, return a synthetic one based on the Job to allow progress display
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Not found", "message": f"Job {job_id} not found"}
+            )
+        
+        # Calculate total nodes from the version
+        total_nodes = 0
+        version_data = None
+        if job.version:
+            total_nodes = len(job.version.nodes) if job.version.nodes else 0
+            version_data = PipelineVersionRead.model_validate(job.version)
+
+        # Create a synthetic response object
+        return PipelineRunDetailRead(
+            id=0,
+            job_id=job_id,
+            pipeline_id=job.pipeline_id,
+            pipeline_version_id=job.pipeline_version_id,
+            run_number=0,
+            status=PipelineRunStatus.PENDING,
+            total_nodes=total_nodes,
+            total_extracted=0,
+            total_loaded=0,
+            total_failed=0,
+            bytes_processed=0,
+            error_message=None,
+            failed_step_id=None,
+            started_at=job.started_at,
+            completed_at=None,
+            duration_seconds=None,
+            created_at=job.created_at,
+            version=version_data,
+            step_runs=[]
+        )
+    
+    response = PipelineRunDetailRead.model_validate(run)
+    # Ensure version is populated
+    if run.version:
+        response.version = PipelineVersionRead.model_validate(run.version)
+    
+    # Include step runs
+    step_runs = service.get_run_steps(run.id)
+    response.step_runs = [StepRunRead.model_validate(s) for s in step_runs]
+    
+    return response
+
+
 @router.post(
     "/jobs/{job_id}/cancel",
     response_model=JobRead,
@@ -292,6 +359,61 @@ def get_step_logs(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Internal server error", "message": "Failed to get step logs"}
         )
+
+
+@router.get(
+    "/runs/{run_id}/steps/{step_id}/data",
+    summary="Get Step Data Sample",
+    description="Fetch a slice of data processed by this node during the run."
+)
+def get_step_data(
+    run_id: int,
+    step_id: int,
+    direction: str = Query("out", regex="^(in|out)$"),
+    limit: int = Query(10, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    try:
+        from app.models.execution import StepRun
+        from app.engine.runner_core.forensics import ForensicSniffer
+        
+        step = db.query(StepRun).filter(StepRun.id == step_id).first()
+        if not step:
+            raise HTTPException(status_code=404, detail="Step run not found")
+        
+        sniffer = ForensicSniffer(run_id)
+        # We use node.id (the integer from pipeline_nodes) which is stored in step.node_id
+        data_slice = sniffer.fetch_slice(step.node_id, direction=direction, limit=limit, offset=offset)
+        
+        return {
+            "step_id": step_id,
+            "node_id": step.node_id,
+            "direction": direction,
+            "data": data_slice,
+            "requested_limit": limit,
+            "requested_offset": offset
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching step data: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch forensic data sample")
+
+
+@router.delete(
+    "/forensics/cache",
+    summary="Clear Forensic Cache",
+    description="Manually purge all cached forensic Parquet files."
+)
+def clear_forensic_cache():
+    try:
+        from app.engine.runner_core.forensics import ForensicSniffer
+        ForensicSniffer.clear_all()
+        return {"status": "success", "message": "Forensic cache cleared"}
+    except Exception as e:
+        logger.error(f"Error clearing forensic cache: {e}")
+        raise HTTPException(status_code=500, detail="Failed to clear forensic cache")
 
 
 @router.get(

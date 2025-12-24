@@ -1,10 +1,13 @@
-from typing import Optional, List, Dict, Any
+from typing import List, Optional, Any, Dict
 from datetime import datetime
-from pydantic import BaseModel, Field, ConfigDict
-from app.models.enums import JobStatus, PipelineRunStatus, OperatorRunStatus, RetryStrategy
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from app.models.enums import JobStatus, PipelineRunStatus, OperatorRunStatus, OperatorType, RetryStrategy
 
+
+from app.schemas.pipeline import PipelineVersionRead
 
 class JobBase(BaseModel):
+    # ... (existing JobBase)
     pipeline_id: int
     pipeline_version_id: int
     status: JobStatus
@@ -13,6 +16,7 @@ class JobBase(BaseModel):
 
 
 class JobRead(JobBase):
+    # ... (existing JobRead)
     id: int
     celery_task_id: Optional[str]
     correlation_id: str
@@ -49,9 +53,14 @@ class StepRunRead(BaseModel):
     id: int
     pipeline_run_id: int
     node_id: int
-    operator_type: str
+    operator_type: OperatorType
     status: OperatorRunStatus
     order_index: int
+    retry_count: int
+    
+    source_asset_id: Optional[int] = None
+    destination_asset_id: Optional[int] = None
+
     records_in: int
     records_out: int
     records_filtered: int
@@ -60,6 +69,7 @@ class StepRunRead(BaseModel):
     duration_seconds: Optional[float]
     cpu_percent: Optional[float]
     memory_mb: Optional[float]
+    sample_data: Optional[Dict[str, Any]]
     error_message: Optional[str]
     error_type: Optional[str]
     started_at: Optional[datetime]
@@ -67,6 +77,21 @@ class StepRunRead(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode='before')
+    @classmethod
+    def extract_asset_ids(cls, data: Any) -> Any:
+        if hasattr(data, 'node') and data.node:
+            # When coming from ORM, 'data' is the StepRun object
+            # We inject the IDs from the related node into the validation dictionary
+            if isinstance(data, dict):
+                data['source_asset_id'] = data.get('node', {}).get('source_asset_id')
+                data['destination_asset_id'] = data.get('node', {}).get('destination_asset_id')
+            else:
+                # Direct attribute access on ORM object
+                setattr(data, 'source_asset_id', data.node.source_asset_id)
+                setattr(data, 'destination_asset_id', data.node.destination_asset_id)
+        return data
 
 
 class PipelineRunBase(BaseModel):
@@ -79,6 +104,7 @@ class PipelineRunBase(BaseModel):
 class PipelineRunRead(PipelineRunBase):
     id: int
     job_id: int
+    total_nodes: int = 0
     total_extracted: int
     total_loaded: int
     total_failed: int
@@ -94,6 +120,7 @@ class PipelineRunRead(PipelineRunBase):
 
 
 class PipelineRunDetailRead(PipelineRunRead):
+    version: Optional[PipelineVersionRead] = None # Will contain version nodes and edges
     step_runs: List[StepRunRead] = Field(default_factory=list)
 
 

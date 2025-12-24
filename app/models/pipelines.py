@@ -8,7 +8,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
 from app.models.base import Base, AuditMixin, SoftDeleteMixin, OwnerMixin
-from app.models.enums import PipelineStatus, OperatorType
+from app.models.enums import PipelineStatus, OperatorType, RetryStrategy
 
 if TYPE_CHECKING:
     from app.models.connections import Asset
@@ -36,6 +36,11 @@ class Pipeline(Base, AuditMixin, SoftDeleteMixin, OwnerMixin):
 
     max_parallel_runs: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    retry_strategy: Mapped[RetryStrategy] = mapped_column(
+        SQLEnum(RetryStrategy), default=RetryStrategy.FIXED, nullable=False
+    )
+    retry_delay_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    
     execution_timeout_seconds: Mapped[Optional[int]] = mapped_column(Integer)
     tags: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
     priority: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
@@ -134,6 +139,11 @@ class PipelineNode(Base, AuditMixin):
     destination_asset_id: Mapped[Optional[int]] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"))
 
     max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    retry_strategy: Mapped[RetryStrategy] = mapped_column(
+        SQLEnum(RetryStrategy), default=RetryStrategy.FIXED, nullable=False
+    )
+    retry_delay_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    
     timeout_seconds: Mapped[Optional[int]] = mapped_column(Integer)
 
     version: Mapped["PipelineVersion"] = relationship(back_populates="nodes")

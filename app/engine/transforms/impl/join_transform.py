@@ -5,22 +5,15 @@ from app.core.errors import ConfigurationError
 
 class JoinTransform(BaseTransform):
     """
-    Joins the current stream with a static dataset or another stream (simulated here).
-    For this MVP, we will simulate joining with a 'lookup' table defined in config 
-    or loaded from a file path provided in config.
-    
+    Joins multiple data streams horizontally.
     Config:
     - on: str (column name to join on)
     - how: str (left, right, inner, outer)
-    - lookup_data: List[Dict] (static data to join with) OR
-    - lookup_file: str (path to CSV/JSON to load as lookup)
     """
 
     def validate_config(self) -> None:
         if "on" not in self.config:
             raise ConfigurationError("JoinTransform requires 'on' column.")
-        if "lookup_data" not in self.config and "lookup_file" not in self.config:
-            raise ConfigurationError("JoinTransform requires 'lookup_data' or 'lookup_file'.")
 
     def transform_multi(self, data_map: Dict[str, Iterator[pd.DataFrame]]) -> Iterator[pd.DataFrame]:
         join_on = self.config["on"]

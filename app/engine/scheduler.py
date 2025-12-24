@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Tuple
 from croniter import croniter
 from sqlalchemy.orm import Session
@@ -111,6 +111,19 @@ class Scheduler:
 
         now = datetime.now(timezone.utc)
         last_trigger_time = self._get_last_scheduled_trigger_time(pipeline.id)
+        
+        # Determine the starting point for schedule calculation
+        start_search_time = last_trigger_time or self._get_pipeline_start_time(pipeline)
+        
+        # If the last trigger was very long ago (outside catchup window), 
+        # jump forward to the start of the catchup window to avoid getting stuck in the past.
+        catchup_limit = now - timedelta(seconds=self.config.CATCHUP_WINDOW_SECONDS)
+        if start_search_time < catchup_limit:
+            logger.info(
+                f"Pipeline {pipeline.id} last run was too long ago. Jumping forward to catchup window.",
+                extra={"pipeline_id": pipeline.id, "last_run": start_search_time.isoformat()}
+            )
+            start_search_time = catchup_limit
 
         # Check if there's a pending or running job to prevent duplicate triggers
         active_jobs_count = self._get_active_jobs_count(pipeline.id)
@@ -124,7 +137,7 @@ class Scheduler:
         # Calculate due runs
         due_runs = self._calculate_due_runs(
             pipeline.schedule_cron,
-            last_trigger_time or self._get_pipeline_start_time(pipeline),
+            start_search_time,
             now,
         )
 
@@ -275,13 +288,19 @@ class Scheduler:
         """
         Get the count of pending or running jobs for a pipeline.
         Used to enforce concurrency limits.
+        Ignores 'stale' jobs that have been stuck for too long.
         """
+        now = datetime.now(timezone.utc)
+        stale_threshold = now - timedelta(hours=2) # Consider jobs stuck for > 2h as stale
+        
         return (
             self.db_session.query(Job)
             .filter(
                 and_(
                     Job.pipeline_id == pipeline_id,
                     Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+                    # Only count jobs that are not stale
+                    Job.created_at > stale_threshold
                 )
             )
             .count()
@@ -371,10 +390,8 @@ class Scheduler:
         if not pipeline or not pipeline.schedule_cron or not pipeline.schedule_enabled:
             return None
 
-        last_trigger = self._get_last_scheduled_trigger_time(pipeline_id)
-        start_time = last_trigger or self._get_pipeline_start_time(pipeline)
-
-        return self._get_next_run_time(pipeline.schedule_cron, start_time)
+        now = datetime.now(timezone.utc)
+        return self._get_next_run_time(pipeline.schedule_cron, now)
 
     def validate_cron_expression(
         self, cron_expression: str

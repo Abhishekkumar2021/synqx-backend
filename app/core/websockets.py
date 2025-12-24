@@ -48,4 +48,16 @@ class ConnectionManager:
         finally:
             await redis.close()
 
+    def broadcast_sync(self, channel: str, message: dict):
+        """
+        Synchronously publishes a message to a Redis channel.
+        Useful for Celery workers.
+        """
+        import redis
+        r = redis.from_url(self.redis_url)
+        try:
+            r.publish(channel, json.dumps(message))
+        finally:
+            r.close()
+
 manager = ConnectionManager()

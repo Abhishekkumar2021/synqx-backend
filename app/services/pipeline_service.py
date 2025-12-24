@@ -1,6 +1,6 @@
 from typing import List, Optional, Dict, Any, Tuple
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy import and_
@@ -62,6 +62,8 @@ class PipelineService:
                 schedule_timezone=pipeline_create.schedule_timezone,
                 max_parallel_runs=pipeline_create.max_parallel_runs or 1,
                 max_retries=pipeline_create.max_retries or 3,
+                retry_strategy=pipeline_create.retry_strategy or RetryStrategy.FIXED,
+                retry_delay_seconds=pipeline_create.retry_delay_seconds or 60,
                 execution_timeout_seconds=pipeline_create.execution_timeout_seconds,
                 tags=pipeline_create.tags,
                 priority=pipeline_create.priority or 0,
@@ -225,6 +227,10 @@ class PipelineService:
             pipeline.max_parallel_runs = pipeline_update.max_parallel_runs
         if pipeline_update.max_retries is not None:
             pipeline.max_retries = pipeline_update.max_retries
+        if pipeline_update.retry_strategy is not None:
+            pipeline.retry_strategy = pipeline_update.retry_strategy
+        if pipeline_update.retry_delay_seconds is not None:
+            pipeline.retry_delay_seconds = pipeline_update.retry_delay_seconds
         if pipeline_update.execution_timeout_seconds is not None:
             pipeline.execution_timeout_seconds = pipeline_update.execution_timeout_seconds
         if pipeline_update.priority is not None:
@@ -372,12 +378,16 @@ class PipelineService:
             raise AppError(f"Pipeline {pipeline_id} not found")
         
         if pipeline.max_parallel_runs:
+            now = datetime.now(timezone.utc)
+            stale_threshold = now - timedelta(hours=2)
+            
             active_jobs_count = (
                 self.db_session.query(Job)
                 .filter(
                     and_(
                         Job.pipeline_id == pipeline_id,
                         Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+                        Job.created_at > stale_threshold
                     )
                 )
                 .count()
@@ -597,6 +607,8 @@ class PipelineService:
                 source_asset_id=node_data.source_asset_id,
                 destination_asset_id=node_data.destination_asset_id,
                 max_retries=node_data.max_retries or 0,
+                retry_strategy=node_data.retry_strategy or RetryStrategy.FIXED,
+                retry_delay_seconds=node_data.retry_delay_seconds or 60,
                 timeout_seconds=node_data.timeout_seconds,
             )
             self.db_session.add(db_node)

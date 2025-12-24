@@ -72,11 +72,18 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 job.celery_task_id = self.request.id
                 session.commit()
 
-            # Check if job is already completed or running
+            # Check if job is already completed, running or cancelled
             if job.status == JobStatus.SUCCESS:
                 logger.warning(
                     f"Job {job_id} already COMPLETED",
                     extra={"job_id": job_id, "status": job.status.value},
+                )
+                return f"Job {job_id} already {job.status.value}"
+
+            if job.status == JobStatus.CANCELLED:
+                logger.warning(
+                    f"Job {job_id} already CANCELLED. Skipping execution.",
+                    extra={"job_id": job_id},
                 )
                 return f"Job {job_id} already {job.status.value}"
 
@@ -100,6 +107,12 @@ def execute_pipeline_task(self, job_id: int) -> str:
             job.started_at = datetime.now(timezone.utc)
             job.retry_count = self.request.retries
             session.commit()
+
+            # Broadcast global list update
+            try:
+                manager.broadcast_sync("jobs_list", {"type": "job_list_update"})
+            except Exception as e:
+                logger.error(f"Failed to broadcast job start: {e}")
 
             DBLogger.log_job(
                 session,
@@ -170,27 +183,21 @@ def execute_pipeline_task(self, job_id: int) -> str:
 
                 runner.run(pipeline_version, session, job_id=job.id)
 
-                # If runner.run completes without exception, all pipeline_run and step_run changes are flushed
-                # and pipeline_run.status is set to COMPLETED.
-                # Mark job as successful
+                # MARK AS SUCCESS IMMEDIATELY AFTER RUN
                 job.status = JobStatus.SUCCESS
                 job.completed_at = datetime.now(timezone.utc)
-
-                # Get the associated PipelineRun to retrieve its duration
+                
                 pipeline_run = session.query(PipelineRun).filter(PipelineRun.job_id == job.id).first()
                 if pipeline_run and pipeline_run.duration_seconds is not None:
                     job.execution_time_ms = int(pipeline_run.duration_seconds * 1000)
                 else:
-                    # Fallback if pipeline_run is not found or duration not set
                     if job.started_at:
                         duration_seconds = (job.completed_at - job.started_at).total_seconds()
                         job.execution_time_ms = int(duration_seconds * 1000)
-                    else:
-                        job.execution_time_ms = 0 # Default if started_at is also missing
+                
+                session.commit() 
 
-                session.commit() # Final commit of all changes in the session
-
-                # Trigger Success Alerts
+                # POST-PROCESSING (Alerts, Logs) - Wrap in try/except to not fail the task
                 try:
                     from app.services.alert_service import AlertService
                     from app.models.enums import AlertType, AlertLevel
@@ -203,85 +210,36 @@ def execute_pipeline_task(self, job_id: int) -> str:
                             message=f"Pipeline execution completed successfully",
                             level=AlertLevel.SUCCESS
                         )
-                except Exception as alert_err:
-                    logger.error(f"Failed to create success alerts: {alert_err}")
-
-                DBLogger.log_job(
-                    session,
-                    job.id,
-                    "INFO",
-                    "Job completed successfully",
-                    source="worker",
-                )
-
-                logger.info(
-                    "Pipeline execution completed",
-                    extra={
-                        "job_id": job_id,
-                        "duration_seconds": (job.execution_time_ms / 1000.0 if job.execution_time_ms else 0.0),
-                    },
-                )
+                    DBLogger.log_job(session, job.id, "INFO", "Job completed successfully", source="worker")
+                except Exception as post_err:
+                    logger.error(f"Post-processing failed but job was successful: {post_err}")
 
                 return f"Job ID {job_id} completed successfully"
 
             except SoftTimeLimitExceeded:
                 error_msg = "Pipeline execution exceeded time limit"
                 logger.error(error_msg, extra={"job_id": job_id})
-                # Set pipeline_run status to failed here as runner.run might not have
-                # caught this specific exception type or the session might be invalid.
-                # Find the pipeline_run in the session and update it.
-                pipeline_run_in_session = (
-                    session.query(PipelineRun)
-                    .filter(PipelineRun.job_id == job_id)
-                    .first()
-                )
+                pipeline_run_in_session = session.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
                 if pipeline_run_in_session:
                     pipeline_run_in_session.status = PipelineRunStatus.FAILED
                     pipeline_run_in_session.completed_at = datetime.now(timezone.utc)
                     pipeline_run_in_session.error_message = error_msg
-                    session.add(pipeline_run_in_session)
-                
                 _mark_job_failed(session, job, error_msg, is_infra_error=True)
-                raise  # Don't retry on timeout
+                return error_msg # No retry on soft timeout
 
             except Exception as e:
-                # This catches exceptions from runner.run
-                logger.error(
-                    "Pipeline execution failed",
-                    extra={
-                        "job_id": job_id,
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                        "retries": self.request.retries,
-                    },
-                    exc_info=True,
-                )
-
-                # Check if the job actually succeeded (e.g. error happened during post-processing logs/alerts)
-                # We open a new session to check the committed state
-                try:
-                    with session_scope() as check_session:
-                        current_job = check_session.query(Job).filter(Job.id == job_id).first()
-                        if current_job and current_job.status == JobStatus.SUCCESS:
-                            logger.error(f"Job {job_id} succeeded but post-processing failed: {e}")
-                            return f"Job {job_id} completed successfully (with post-processing errors)"
-                except Exception as check_err:
-                    logger.error(f"Failed to verify job status after error: {check_err}")
-
-                # At this point, runner.run should have already marked pipeline_run as FAILED and flushed.
-                # We just need to handle the job status and commit/retry.
+                # Catch actual pipeline execution failure
+                logger.error(f"Pipeline execution failed: {e}", extra={"job_id": job_id}, exc_info=True)
+                
+                from app.core.errors import PipelineExecutionError
                 should_retry = _should_retry_job(job, e, self.request.retries)
 
                 if should_retry and self.request.retries < self.max_retries:
-                    # _mark_job_retrying commits the session
                     _mark_job_retrying(session, job, str(e))
-                    raise self.retry(
-                        exc=e, countdown=_calculate_retry_delay(self.request.retries)
-                    )
+                    raise self.retry(exc=e, countdown=_calculate_retry_delay(job, self.request.retries))
                 else:
-                    # _mark_job_failed commits the session
                     _mark_job_failed(session, job, str(e), is_infra_error=False)
-                    raise
+                    return f"Job ID {job_id} failed"
 
     except Retry:
         # Let retry exception propagate
@@ -432,7 +390,7 @@ def _mark_job_failed(
     if pipeline_run:
         if pipeline_run.started_at:
             pipeline_run.duration_seconds = (
-                pipeline_run.completed_at - pipeline_run.started_at
+                job.completed_at - pipeline_run.started_at
             ).total_seconds()
             job.execution_time_ms = int(pipeline_run.duration_seconds * 1000)
         session.add(pipeline_run) # Persist changes to pipeline_run
@@ -473,7 +431,7 @@ def _mark_job_failed(
 def _mark_job_retrying(session, job: Job, error_message: str) -> None:
     """Mark a job as retrying."""
     job.status = JobStatus.PENDING  # Back to pending for retry
-    job.error_message = f"Retry after error: {error_message}"
+    job.infra_error = f"Retry after error: {error_message}"
     session.commit()
 
     DBLogger.log_job(
@@ -515,9 +473,9 @@ def _should_retry_job(job: Job, error: Exception, retry_count: int) -> bool:
     return True
 
 
-def _calculate_retry_delay(retry_count: int) -> int:
+def _calculate_retry_delay(job: Job, retry_count: int) -> int:
     """
-    Calculate retry delay with exponential backoff.
+    Calculate retry delay based on the job's retry strategy.
     Returns delay in seconds.
     """
     # Exponential backoff: 60s, 120s, 240s, etc.

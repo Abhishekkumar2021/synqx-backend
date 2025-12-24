@@ -69,6 +69,24 @@ class JobService:
                 )
                 job.execution_time_ms = duration_ms
 
+            # Update associated PipelineRun and StepRuns
+            pipeline_run = self.db_session.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
+            if pipeline_run:
+                pipeline_run.status = PipelineRunStatus.CANCELLED
+                pipeline_run.completed_at = datetime.now(timezone.utc)
+                pipeline_run.error_message = f"Cancelled: {reason}" if reason else "Cancelled by user"
+                
+                # Also cancel active step runs
+                from app.models.enums import OperatorRunStatus
+                active_steps = self.db_session.query(StepRun).filter(
+                    StepRun.pipeline_run_id == pipeline_run.id,
+                    StepRun.status == OperatorRunStatus.RUNNING
+                ).all()
+                for step in active_steps:
+                    step.status = OperatorRunStatus.FAILED
+                    step.completed_at = datetime.now(timezone.utc)
+                    step.error_message = "Cancelled due to job cancellation"
+
             if reason:
                 job.infra_error = f"Cancelled: {reason}"
 
@@ -92,9 +110,9 @@ class JobService:
         if not job:
             raise AppError(f"Job {job_id} not found")
 
-        if job.status != JobStatus.FAILED:
+        if job.status not in [JobStatus.FAILED, JobStatus.CANCELLED]:
             raise AppError(
-                f"Can only retry failed jobs. Current status: {job.status.value}"
+                f"Can only retry failed or cancelled jobs. Current status: {job.status.value}"
             )
 
         if not force and job.retry_count >= job.max_retries:
@@ -229,6 +247,7 @@ class PipelineRunService:
 
     def get_run_steps(self, run_id: int) -> List[StepRun]:
         """Get all step runs for a pipeline run."""
+        from sqlalchemy.orm import joinedload
         run = self.get_run(run_id)
 
         if not run:
@@ -236,6 +255,7 @@ class PipelineRunService:
 
         return (
             self.db_session.query(StepRun)
+            .options(joinedload(StepRun.node))
             .filter(StepRun.pipeline_run_id == run_id)
             .order_by(StepRun.order_index)
             .all()

@@ -220,7 +220,8 @@ class SQLConnector(BaseConnector):
         
         chunksize = kwargs.pop("chunksize", 10000)
         try:
-            for chunk in pd.read_sql_query(text(query), con=self._connection, chunksize=chunksize, **kwargs):
+            # Use bind parameters for safety and type handling
+            for chunk in pd.read_sql_query(text(query), con=self._connection, chunksize=chunksize, params=params, **kwargs):
                 yield chunk
         except Exception as e:
             raise DataTransferError(f"Read failed for {asset}: {e}")
@@ -244,7 +245,8 @@ class SQLConnector(BaseConnector):
                 final_query += f" OFFSET {offset}"
             
             df = pd.read_sql_query(text(final_query), con=self._connection, **kwargs)
-            return df.where(pd.notnull(df), None).to_dict(orient="records")
+            # Safe conversion of NaN to None for JSON compliance
+            return df.replace({np.nan: None}).to_dict(orient="records")
         except Exception as e:
             raise DataTransferError(f"Query execution failed: {e}")
 
@@ -254,6 +256,14 @@ class SQLConnector(BaseConnector):
         self.connect()
         schema = self.config.get("db_schema") or self.config.get("schema")
         
+        # Discover target columns to prevent errors from extra columns (e.g. joined results)
+        try:
+            inspector = inspect(self._engine)
+            target_columns = [c['name'] for c in inspector.get_columns(asset, schema=schema)]
+        except Exception as e:
+            logger.warning(f"Could not inspect columns for {asset}, skipping auto-filter: {e}")
+            target_columns = []
+
         if isinstance(data, pd.DataFrame):
             data_iter = [data]
         else:
@@ -262,11 +272,20 @@ class SQLConnector(BaseConnector):
         total = 0
         try:
             for df in data_iter:
-                if df.empty: continue
+                if df is None or df.empty: 
+                    continue
+                
+                # Filter columns if we successfully inspected the target
+                if target_columns:
+                    valid_cols = [c for c in df.columns if c in target_columns]
+                    if not valid_cols:
+                        logger.warning(f"No matching columns for {asset}. Data columns: {df.columns.tolist()}")
+                        continue
+                    df = df[valid_cols]
+
                 # Robust type conversion for SQL
                 for col in df.columns:
                     if df[col].dtype == 'object':
-                        # Convert complex types to JSON strings if they are dicts/lists
                         df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
                 
                 df.to_sql(

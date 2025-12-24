@@ -2,7 +2,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from croniter import croniter
-from app.models.enums import PipelineStatus, OperatorType
+from app.models.enums import PipelineStatus, OperatorType, RetryStrategy
 
 
 class PipelineNodeBase(BaseModel):
@@ -16,6 +16,8 @@ class PipelineNodeBase(BaseModel):
     source_asset_id: Optional[int] = Field(None, gt=0)
     destination_asset_id: Optional[int] = Field(None, gt=0)
     max_retries: int = Field(default=3, ge=0, le=10)
+    retry_strategy: RetryStrategy = Field(default=RetryStrategy.FIXED)
+    retry_delay_seconds: int = Field(default=60, ge=0, le=3600)
     timeout_seconds: Optional[int] = Field(None, gt=0, le=86400)
 
     @field_validator("node_id")
@@ -183,6 +185,8 @@ class PipelineBase(BaseModel):
     schedule_timezone: str = Field(default="UTC", max_length=50)
     max_parallel_runs: int = Field(default=1, ge=1, le=100)
     max_retries: int = Field(default=3, ge=0, le=10)
+    retry_strategy: RetryStrategy = Field(default=RetryStrategy.FIXED)
+    retry_delay_seconds: int = Field(default=60, ge=0, le=3600)
     execution_timeout_seconds: Optional[int] = Field(None, gt=0, le=86400)
     tags: Optional[Dict[str, Any]] = Field(default_factory=dict)
     priority: int = Field(default=5, ge=1, le=10)
@@ -233,6 +237,8 @@ class PipelineUpdate(BaseModel):
     status: Optional[PipelineStatus] = None
     max_parallel_runs: Optional[int] = Field(None, ge=1, le=100)
     max_retries: Optional[int] = Field(None, ge=0, le=10)
+    retry_strategy: Optional[RetryStrategy] = None
+    retry_delay_seconds: Optional[int] = Field(None, ge=0, le=3600)
     execution_timeout_seconds: Optional[int] = Field(None, gt=0, le=86400)
     tags: Optional[Dict[str, Any]] = None
     priority: Optional[int] = Field(None, ge=1, le=10)

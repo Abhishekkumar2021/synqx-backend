@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
 from sqlalchemy import (
     Integer, String, Float, DateTime, Text, ForeignKey, 
-    UniqueConstraint, Index, JSON, Enum as SQLEnum
+    UniqueConstraint, Index, JSON, Enum as SQLEnum, BigInteger
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
@@ -47,7 +47,7 @@ class Job(Base, AuditMixin):
 
     worker_id: Mapped[Optional[str]] = mapped_column(String(255))
     queue_name: Mapped[Optional[str]] = mapped_column(String(255))
-    execution_time_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    execution_time_ms: Mapped[Optional[int]] = mapped_column(BigInteger)
     
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -90,11 +90,12 @@ class PipelineRun(Base, AuditMixin):
     status: Mapped[PipelineRunStatus] = mapped_column(
         SQLEnum(PipelineRunStatus), default=PipelineRunStatus.PENDING, nullable=False, index=True,
     )
+    total_nodes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    total_extracted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    total_loaded: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    total_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    bytes_processed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_extracted: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    total_loaded: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    total_failed: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    bytes_processed: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     failed_step_id: Mapped[Optional[int]] = mapped_column(Integer)
@@ -142,16 +143,18 @@ class StepRun(Base, AuditMixin):
     )
 
     order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    records_in: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    records_out: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    records_filtered: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    records_error: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    bytes_processed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    records_in: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    records_out: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    records_filtered: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    records_error: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    bytes_processed: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
 
     duration_seconds: Mapped[Optional[float]] = mapped_column(Float)
     cpu_percent: Mapped[Optional[float]] = mapped_column(Float)
     memory_mb: Mapped[Optional[float]] = mapped_column(Float)
+    sample_data: Mapped[Optional[dict]] = mapped_column(JSON)
 
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     error_type: Mapped[Optional[str]] = mapped_column(String(255))

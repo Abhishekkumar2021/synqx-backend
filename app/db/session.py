@@ -1,13 +1,16 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 from contextlib import contextmanager
 
 from app.core.config import settings
 
-# Create the database engine
+# Create the database engine with NullPool to disable pooling.
+# This ensures that connections are closed immediately and not held 
+# in a pool, preventing "too many clients" errors across many processes.
 engine = create_engine(
     settings.DATABASE_URL, 
-    pool_pre_ping=True,
+    poolclass=NullPool,
     echo=False
 )
 

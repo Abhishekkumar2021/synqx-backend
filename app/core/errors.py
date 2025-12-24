@@ -24,16 +24,14 @@ class SchemaDiscoveryError(ConnectorError):
     """Raised when schema discovery fails."""
     pass
 
-class DataTransferError(ConnectorError):
-
-    """Raised during data read/write operations."""
-
+class DataTransferError(AppError):
+    """Raised when data transfer between connectors fails."""
     pass
 
-
+class PipelineExecutionError(AppError):
+    """Raised when a pipeline execution fails and may be eligible for retry."""
+    pass
 
 class TransformationError(AppError):
-
     """Raised during data transformation operations."""
-
     pass

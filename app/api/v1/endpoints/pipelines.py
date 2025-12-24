@@ -650,3 +650,42 @@ def get_pipeline_stats(
                 "message": "Failed to get pipeline statistics",
             },
         )
+
+
+@router.get(
+    "/{pipeline_id}/watermarks/{asset_id}",
+    summary="Get Watermark State",
+    description="Get the current incremental sync state for a specific asset in this pipeline"
+)
+def get_pipeline_watermark(
+    pipeline_id: int,
+    asset_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        from app.models.execution import Watermark
+        # Verify pipeline access
+        service = PipelineService(db)
+        pipeline = service.get_pipeline(pipeline_id, user_id=current_user.id)
+        if not pipeline:
+            raise HTTPException(status_code=404, detail="Pipeline not found")
+
+        wm = db.query(Watermark).filter(
+            Watermark.pipeline_id == pipeline_id,
+            Watermark.asset_id == asset_id
+        ).first()
+
+        if not wm:
+            return {"last_value": None, "last_updated": None}
+
+        return {
+            "last_value": wm.last_value,
+            "last_updated": wm.last_updated,
+            "watermark_column": wm.watermark_column
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting watermark: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")

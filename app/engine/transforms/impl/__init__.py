@@ -10,11 +10,11 @@ from app.engine.transforms.impl.deduplicate_transform import DeduplicateTransfor
 from app.engine.transforms.impl.fill_nulls_transform import FillNullsTransform
 from app.engine.transforms.impl.sort_transform import SortTransform
 from app.engine.transforms.impl.type_cast_transform import TypeCastTransform
-from app.engine.transforms.factory import TransformFactory
 from app.engine.transforms.impl.regex_replace_transform import RegexReplaceTransform
 from app.engine.transforms.impl.code_transform import CodeTransform
 from app.engine.transforms.impl.union_transform import UnionTransform
 
+# Register all available transforms
 TransformFactory.register_transform("pandas_transform", PandasTransform)
 TransformFactory.register_transform("filter", FilterTransform)
 TransformFactory.register_transform("map", MapTransform)
@@ -29,3 +29,5 @@ TransformFactory.register_transform("sort", SortTransform)
 TransformFactory.register_transform("type_cast", TypeCastTransform)
 TransformFactory.register_transform("regex_replace", RegexReplaceTransform)
 TransformFactory.register_transform("code", CodeTransform)
+TransformFactory.register_transform("noop", NoOpTransform)
+TransformFactory.register_transform("pass_through", NoOpTransform)
