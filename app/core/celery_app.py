@@ -1,5 +1,7 @@
 from celery import Celery
 from app.core.config import settings
+import app.connectors.impl  # Register connectors for worker
+import app.engine.transforms.impl  # Register transforms for worker
 
 celery_app = Celery(
     "synqx_worker",

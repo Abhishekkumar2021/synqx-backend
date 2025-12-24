@@ -1,5 +1,5 @@
 import setuptools  # Patch for Python 3.12+ distutils removal
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from celery.exceptions import SoftTimeLimitExceeded, Retry
 from app.core.celery_app import celery_app
@@ -10,6 +10,8 @@ from app.models.enums import JobStatus, PipelineRunStatus
 from app.models.pipelines import PipelineVersion
 from app.engine.runner import PipelineRunner
 from app.core.db_logging import DBLogger
+from app.core.errors import ConfigurationError
+import app.connectors.impl # Ensure connectors are registered
 
 logger = get_logger(__name__)
 
@@ -524,8 +526,3 @@ def _calculate_retry_delay(retry_count: int) -> int:
 
     delay = min(base_delay * (2**retry_count), max_delay)
     return delay
-
-
-# Import at bottom to avoid circular imports
-from datetime import timedelta
-from app.core.errors import ConfigurationError

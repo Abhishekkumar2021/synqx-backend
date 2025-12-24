@@ -2,9 +2,9 @@ from typing import Any, Dict, Iterator, List, Optional, Union
 import httpx
 import pandas as pd
 from app.connectors.base import BaseConnector
-from app.core.errors import ConfigurationError, ConnectionFailedError, DataTransferError
+from app.core.errors import ConfigurationError, DataTransferError
 from app.core.logging import get_logger
-from pydantic import Field, AnyHttpUrl
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = get_logger(__name__)
@@ -113,14 +113,26 @@ class RestApiConnector(BaseConnector):
         params = kwargs.get("params", {}).copy()
         if limit: params["limit"] = limit
         if offset: params["offset"] = offset
+        
+        incremental_filter = kwargs.get("incremental_filter")
 
         try:
             res = self.client.get(asset, params=params)
             res.raise_for_status()
             data = res.json()
             records = self._normalize(data)
+            
             if records:
-                yield pd.DataFrame(records)
+                df = pd.DataFrame(records)
+                
+                # Apply Incremental Filter
+                if incremental_filter and isinstance(incremental_filter, dict):
+                    for col, val in incremental_filter.items():
+                        if col in df.columns:
+                            df = df[df[col] > val]
+                
+                if not df.empty:
+                    yield df
         except Exception as e:
             raise DataTransferError(f"REST API read failed: {e}")
 

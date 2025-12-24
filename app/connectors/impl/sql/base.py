@@ -6,15 +6,12 @@ from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.engine import Engine, Connection
 from app.connectors.base import BaseConnector
 from app.core.errors import (
-    ConfigurationError,
     ConnectionFailedError,
     AuthenticationError,
     SchemaDiscoveryError,
     DataTransferError,
 )
 from app.core.logging import get_logger
-from datetime import datetime
-import time
 
 logger = get_logger(__name__)
 
@@ -171,8 +168,30 @@ class SQLConnector(BaseConnector):
         self.connect()
         
         custom_query = kwargs.get("query")
+        incremental_filter = kwargs.get("incremental_filter")
+
         if custom_query:
             clean_query = custom_query.strip().rstrip(';')
+            
+            # Apply incremental filter to custom query if simple enough, 
+            # otherwise simplistic appending might break complex queries.
+            # For now, we assume standard SELECTs or users must handle it in custom query logic manually
+            # if they provide a raw string. 
+            # BUT, we can try to wrap it: SELECT * FROM (custom_query) WHERE ...
+            
+            if incremental_filter and isinstance(incremental_filter, dict):
+                where_clauses = []
+                for col, val in incremental_filter.items():
+                    # Check if value is numeric or string to quote accordingly
+                    if isinstance(val, (int, float)):
+                        where_clauses.append(f"{col} > {val}")
+                    else:
+                        where_clauses.append(f"{col} > '{val}'")
+                
+                if where_clauses:
+                    # Wrap to safely apply WHERE
+                    clean_query = f"SELECT * FROM ({clean_query}) AS subq WHERE {' AND '.join(where_clauses)}"
+
             if limit and "limit" not in clean_query.lower():
                 clean_query += f" LIMIT {limit}"
             if offset and "offset" not in clean_query.lower():
@@ -183,6 +202,19 @@ class SQLConnector(BaseConnector):
             table_ref = f'{schema}.{asset}' if schema else f'{asset}'
             
             query = f"SELECT * FROM {table_ref}"
+            
+            # Apply Incremental Logic
+            if incremental_filter and isinstance(incremental_filter, dict):
+                where_clauses = []
+                for col, val in incremental_filter.items():
+                    if isinstance(val, (int, float)):
+                        where_clauses.append(f"{col} > {val}")
+                    else:
+                        where_clauses.append(f"{col} > '{val}'")
+                
+                if where_clauses:
+                    query += f" WHERE {' AND '.join(where_clauses)}"
+
             if limit: query += f" LIMIT {limit}"
             if offset: query += f" OFFSET {offset}"
         

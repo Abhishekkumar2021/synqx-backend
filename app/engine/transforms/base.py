@@ -29,11 +29,11 @@ class BaseTransform(ABC):
         """
         pass
 
-    def transform_multi(self, data_map: Dict[str, List[pd.DataFrame]]) -> Iterator[pd.DataFrame]:
+    def transform_multi(self, data_map: Dict[str, Iterator[pd.DataFrame]]) -> Iterator[pd.DataFrame]:
         """
-        Apply transformation to multiple data streams (blocking).
-        Default implementation converts data_map to a single iterator if possible,
-        but typically multi-input operators override this.
+        Apply transformation to multiple data streams.
+        Supports streaming inputs. Operators that require full materialization (e.g. Join)
+        must handle it internally.
         """
         raise NotImplementedError("Multi-input transformation not implemented for this operator.")
 

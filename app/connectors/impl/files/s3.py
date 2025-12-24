@@ -1,6 +1,5 @@
 from typing import Any, Dict, List, Optional, Iterator, Union
 import pandas as pd
-import boto3
 import s3fs
 from app.connectors.base import BaseConnector
 from app.core.errors import ConfigurationError, ConnectionFailedError, DataTransferError
@@ -118,6 +117,7 @@ class S3Connector(BaseConnector):
         self.connect()
         path = f"s3://{self._config_model.bucket}/{asset}"
         fmt = asset.split('.')[-1].lower()
+        incremental_filter = kwargs.get("incremental_filter")
         
         storage_options = {
             "key": self._config_model.aws_access_key_id,
@@ -126,18 +126,42 @@ class S3Connector(BaseConnector):
         }
 
         try:
+            df_iter: Iterator[pd.DataFrame]
             if fmt == 'csv':
-                # Efficient reading for CSV
-                df = pd.read_csv(path, storage_options=storage_options, nrows=limit, skiprows=range(1, offset + 1) if offset else None)
-                yield df
+                # Read in chunks to support filtering without OOM
+                chunksize = kwargs.get("chunksize", 10000)
+                df_iter = pd.read_csv(path, storage_options=storage_options, chunksize=chunksize, skiprows=range(1, offset + 1) if offset else None)
             elif fmt == 'parquet':
                 df = pd.read_parquet(path, storage_options=storage_options)
-                yield self.slice_dataframe(df, offset, limit)
+                df_iter = iter([self.slice_dataframe(df, offset, None)])
             elif fmt in ('json', 'jsonl'):
                 df = pd.read_json(path, storage_options=storage_options, lines=(fmt == 'jsonl'))
-                yield self.slice_dataframe(df, offset, limit)
+                df_iter = iter([self.slice_dataframe(df, offset, None)])
             else:
                 raise DataTransferError(f"Unsupported S3 file format: {fmt}")
+
+            rows_yielded = 0
+            for df in df_iter:
+                # Apply Incremental Filter
+                if incremental_filter and isinstance(incremental_filter, dict):
+                    for col, val in incremental_filter.items():
+                        if col in df.columns:
+                            df = df[df[col] > val]
+                
+                if df.empty:
+                    continue
+
+                # Apply limit
+                if limit:
+                    remaining = limit - rows_yielded
+                    if remaining <= 0:
+                        break
+                    if len(df) > remaining:
+                        df = df.iloc[:remaining]
+                
+                rows_yielded += len(df)
+                yield df
+
         except Exception as e:
             raise DataTransferError(f"S3 read failed for {asset}: {e}")
 

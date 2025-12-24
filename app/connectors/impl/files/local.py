@@ -45,7 +45,7 @@ class LocalFileConnector(BaseConnector):
 
     def _get_full_path(self, asset: str) -> str:
         # Prevent path traversal
-        clean_asset = os.path.basename(asset) if not "/" in asset else asset
+        clean_asset = os.path.basename(asset) if "/" not in asset else asset
         path = os.path.join(self._config_model.base_path, clean_asset)
         return os.path.abspath(path)
 
@@ -94,25 +94,53 @@ class LocalFileConnector(BaseConnector):
     ) -> Iterator[pd.DataFrame]:
         path = self._get_full_path(asset)
         fmt = asset.split('.')[-1].lower()
+        incremental_filter = kwargs.get("incremental_filter")
         
         if not os.path.exists(path):
             raise DataTransferError(f"File not found: {path}")
 
         try:
+            df_iter: Iterator[pd.DataFrame]
             if fmt == 'csv':
-                df = pd.read_csv(path, nrows=limit, skiprows=range(1, offset + 1) if offset else None)
-                yield df
+                # For CSV, we can't easily filter before reading without scanning. 
+                # We read in chunks to manage memory, then filter.
+                chunksize = kwargs.get("chunksize", 10000)
+                df_iter = pd.read_csv(path, chunksize=chunksize, skiprows=range(1, offset + 1) if offset else None)
             elif fmt == 'parquet':
                 df = pd.read_parquet(path)
-                yield self.slice_dataframe(df, offset, limit)
+                df_iter = iter([self.slice_dataframe(df, offset, None)]) # Limit handled after filter
             elif fmt in ('json', 'jsonl'):
                 df = pd.read_json(path, lines=(fmt == 'jsonl'))
-                yield self.slice_dataframe(df, offset, limit)
+                df_iter = iter([self.slice_dataframe(df, offset, None)])
             elif fmt in ('xls', 'xlsx'):
                 df = pd.read_excel(path)
-                yield self.slice_dataframe(df, offset, limit)
+                df_iter = iter([self.slice_dataframe(df, offset, None)])
             else:
                 raise DataTransferError(f"Unsupported local file format: {fmt}")
+
+            # Apply Incremental Filter and Limit
+            rows_yielded = 0
+            for df in df_iter:
+                if incremental_filter and isinstance(incremental_filter, dict):
+                    for col, val in incremental_filter.items():
+                        if col in df.columns:
+                            # Apply generic "greater than" logic for incremental load
+                            df = df[df[col] > val]
+                
+                if df.empty:
+                    continue
+                
+                # Apply limit if it was passed (and not handled by read_csv natively for chunks)
+                if limit:
+                    remaining = limit - rows_yielded
+                    if remaining <= 0:
+                        break
+                    if len(df) > remaining:
+                        df = df.iloc[:remaining]
+                
+                rows_yielded += len(df)
+                yield df
+
         except Exception as e:
             raise DataTransferError(f"Error reading local file {asset}: {e}")
 

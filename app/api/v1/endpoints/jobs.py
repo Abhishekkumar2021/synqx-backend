@@ -7,12 +7,12 @@ from app.schemas.job import (
     JobListResponse,
     JobCancelRequest,
     JobRetryRequest,
-    JobLogRead,
     PipelineRunRead,
     PipelineRunDetailRead,
     PipelineRunListResponse,
     StepRunRead,
     StepLogRead,
+    UnifiedLogRead,
 )
 from app.services.job_service import JobService, PipelineRunService
 from app.api.deps import get_db
@@ -145,7 +145,7 @@ def retry_job(
 
 @router.get(
     "/jobs/{job_id}/logs",
-    response_model=List[JobLogRead],
+    response_model=List[UnifiedLogRead],
     summary="Get Job Logs",
     description="Get logs for a specific job"
 )
@@ -165,7 +165,7 @@ def get_job_logs(
             )
         
         logs = service.get_job_logs(job_id, level=level)
-        return [JobLogRead.model_validate(log) for log in logs]
+        return [UnifiedLogRead.model_validate(log) for log in logs]
         
     except HTTPException:
         raise

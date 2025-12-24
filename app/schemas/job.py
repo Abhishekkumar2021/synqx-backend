@@ -126,3 +126,17 @@ class StepLogRead(BaseModel):
     source: Optional[str]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class UnifiedLogRead(BaseModel):
+    id: int
+    level: str
+    message: str
+    metadata_payload: Optional[Dict[str, Any]]
+    timestamp: datetime
+    source: Optional[str]
+    job_id: Optional[int] = None
+    step_run_id: Optional[int] = None
+    type: str = "log"
+
+    model_config = ConfigDict(from_attributes=True)

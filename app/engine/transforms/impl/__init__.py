@@ -13,12 +13,14 @@ from app.engine.transforms.impl.type_cast_transform import TypeCastTransform
 from app.engine.transforms.factory import TransformFactory
 from app.engine.transforms.impl.regex_replace_transform import RegexReplaceTransform
 from app.engine.transforms.impl.code_transform import CodeTransform
+from app.engine.transforms.impl.union_transform import UnionTransform
 
 TransformFactory.register_transform("pandas_transform", PandasTransform)
 TransformFactory.register_transform("filter", FilterTransform)
 TransformFactory.register_transform("map", MapTransform)
 TransformFactory.register_transform("aggregate", AggregateTransform)
 TransformFactory.register_transform("join", JoinTransform)
+TransformFactory.register_transform("union", UnionTransform)
 TransformFactory.register_transform("rename_columns", RenameColumnsTransform)
 TransformFactory.register_transform("drop_columns", DropColumnsTransform)
 TransformFactory.register_transform("deduplicate", DeduplicateTransform)

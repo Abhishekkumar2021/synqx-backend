@@ -1,4 +1,3 @@
-from typing import Any, Dict
 from app.connectors.impl.sql.base import SQLConnector
 from app.connectors.impl.sql.postgres import PostgresConfig
 from app.core.errors import ConfigurationError

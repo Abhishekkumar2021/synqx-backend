@@ -66,7 +66,7 @@ def delete_alert_config(
 
 # Alert Instance Endpoints
 
-@router.get("/history", response_model=List[alert_schema.AlertRead])
+@router.get("/history", response_model=alert_schema.AlertListResponse)
 def list_alerts(
     db: Session = Depends(deps.get_db),
     current_user: models.User = Depends(deps.get_current_user),
@@ -74,11 +74,9 @@ def list_alerts(
     limit: int = 100,
 ) -> Any:
     """
-    List individual alerts.
+    List individual alerts with pagination.
     """
-    # Alerts are linked to alert_configs which are linked to users
-    # OR they are system alerts (config_id=None) addressed to the user via recipient field
-    return db.query(models.Alert).outerjoin(
+    query = db.query(models.Alert).outerjoin(
         models.AlertConfig, models.Alert.alert_config_id == models.AlertConfig.id
     ).filter(
         or_(
@@ -88,7 +86,17 @@ def list_alerts(
                 models.Alert.recipient == str(current_user.id)
             )
         )
-    ).order_by(models.Alert.created_at.desc()).offset(skip).limit(limit).all()
+    )
+    
+    total = query.count()
+    items = query.order_by(models.Alert.created_at.desc()).offset(skip).limit(limit).all()
+    
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": skip
+    }
 
 @router.patch("/history/{alert_id}", response_model=alert_schema.AlertRead)
 def update_alert_status(

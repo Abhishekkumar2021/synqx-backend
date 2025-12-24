@@ -81,6 +81,19 @@ class BigQueryConnector(BaseConnector):
     def read_batch(self, asset: str, limit: Optional[int] = None, offset: Optional[int] = None, **kwargs) -> Iterator[pd.DataFrame]:
         self.connect()
         query = f"SELECT * FROM `{self._config_model.project_id}.{self._config_model.dataset_id}.{asset}`"
+        
+        incremental_filter = kwargs.get("incremental_filter")
+        if incremental_filter and isinstance(incremental_filter, dict):
+            where_clauses = []
+            for col, val in incremental_filter.items():
+                if isinstance(val, (int, float)):
+                    where_clauses.append(f"{col} > {val}")
+                else:
+                    where_clauses.append(f"{col} > '{val}'")
+            
+            if where_clauses:
+                query += f" WHERE {' AND '.join(where_clauses)}"
+
         if limit:
             query += f" LIMIT {limit}"
         if offset:

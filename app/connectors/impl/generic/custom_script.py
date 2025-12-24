@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Iterator, Union
+from typing import Any, Dict, List, Optional, Iterator
 import pandas as pd
 import subprocess
 import tempfile
@@ -37,7 +37,21 @@ class CustomScriptConnector(BaseConnector):
         pass
 
     def test_connection(self) -> bool:
-        return True
+        """
+        Tests if the execution environment is ready.
+        Tries to run a simple python command.
+        """
+        try:
+            # Simple check if we can run python code
+            test_code = "print('ok')"
+            # Reuse execute logic or just run subprocess directly for speed
+            # Since we have _execute_python, let's try to verify imports work
+            local_scope = {"pd": pd}
+            exec("import pandas as pd", local_scope)
+            return True
+        except Exception as e:
+            logger.error(f"Custom Script environment check failed: {e}")
+            return False
 
     def discover_assets(
         self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
@@ -79,22 +93,31 @@ class CustomScriptConnector(BaseConnector):
             else:
                 raise DataTransferError(f"No code provided for asset '{asset}' and file not found.")
 
+        incremental_filter = kwargs.get("incremental_filter")
+        
+        # Clean up kwargs to avoid multiple values for arguments
+        exec_kwargs = kwargs.copy()
+        for key in ["code", "query", "language", "incremental_filter"]:
+            exec_kwargs.pop(key, None)
+
         if language == "python":
-            yield from self._execute_python(asset, code, limit, offset, **kwargs)
+            yield from self._execute_python(asset, code, limit, offset, incremental_filter=incremental_filter, **exec_kwargs)
         elif language == "shell":
-            yield from self._execute_shell(asset, code, limit, offset, **kwargs)
+            yield from self._execute_shell(asset, code, limit, offset, incremental_filter=incremental_filter, **exec_kwargs)
         else:
             raise ConfigurationError(f"Unsupported script language: {language}")
 
-    def _execute_python(self, asset_name: str, code: str, limit: int, offset: int, **kwargs) -> Iterator[pd.DataFrame]:
+    def _execute_python(self, asset_name: str, code: str, limit: int, offset: int, incremental_filter: Optional[Dict] = None, **kwargs) -> Iterator[pd.DataFrame]:
         """
         Executes Python code in-process. 
-        Expects the code to define a function matching `asset_name` OR `extract` OR `main`.
         """
+        from datetime import datetime, timedelta
         local_scope = {
             "pd": pd,
             "pandas": pd,
-            "json": json
+            "json": json,
+            "datetime": datetime,
+            "timedelta": timedelta
         }
         
         try:
@@ -107,50 +130,65 @@ class CustomScriptConnector(BaseConnector):
         
         if not func or not callable(func):
             # Fallback: Did the script produce a variable named 'data' or 'df'?
-            if "df" in local_scope and isinstance(local_scope["df"], pd.DataFrame):
-                yield local_scope["df"]
-                return
-            if "data" in local_scope and isinstance(local_scope["data"], list):
-                yield pd.DataFrame(local_scope["data"])
-                return
+            # We wrap this in an iterator to apply filtering below consistently
+            def variable_yielder():
+                if "df" in local_scope and isinstance(local_scope["df"], pd.DataFrame):
+                    yield local_scope["df"]
+                elif "data" in local_scope and isinstance(local_scope["data"], list):
+                    yield pd.DataFrame(local_scope["data"])
+                else:
+                    raise DataTransferError(f"No callable function ('{asset_name}', 'extract', 'main') or 'df'/'data' variable found in script.")
             
-            raise DataTransferError(f"No callable function ('{asset_name}', 'extract', 'main') or 'df'/'data' variable found in script.")
+            result_iter = variable_yielder()
+            filter_consumed = False # Variable approach can't consume args
+        else:
+            # Call the function
+            try:
+                # Inspect signature to pass args if accepted
+                sig = inspect.signature(func)
+                call_args = {}
+                if 'limit' in sig.parameters: call_args['limit'] = limit
+                if 'offset' in sig.parameters: call_args['offset'] = offset
+                if 'incremental_filter' in sig.parameters: call_args['incremental_filter'] = incremental_filter
+                
+                # Pass kwargs too if they match
+                for k,v in kwargs.items():
+                    if k in sig.parameters: call_args[k] = v
 
-        # Call the function
-        try:
-            # Inspect signature to pass args if accepted
-            sig = inspect.signature(func)
-            call_args = {}
-            if 'limit' in sig.parameters: call_args['limit'] = limit
-            if 'offset' in sig.parameters: call_args['offset'] = offset
+                # Check if the user function accepted the filter
+                filter_consumed = 'incremental_filter' in call_args
+
+                result = func(**call_args)
+                
+                # Normalize result to iterator
+                if isinstance(result, pd.DataFrame):
+                    result_iter = iter([result])
+                elif isinstance(result, list):
+                    result_iter = iter([pd.DataFrame(result)])
+                elif isinstance(result, Iterator):
+                    result_iter = result
+                else:
+                    result_iter = iter([pd.DataFrame([result])])
+
+            except Exception as e:
+                raise DataTransferError(f"Error during Python execution: {e}")
+
+        # Yield results, applying fallback filtering if needed
+        for chunk in result_iter:
+            df = chunk if isinstance(chunk, pd.DataFrame) else pd.DataFrame(chunk)
             
-            # Pass kwargs too if they match
-            for k,v in kwargs.items():
-                if k in sig.parameters: call_args[k] = v
-
-            result = func(**call_args)
+            if not filter_consumed and incremental_filter and isinstance(incremental_filter, dict):
+                # Fallback: Apply filter in memory since script didn't accept it
+                for col, val in incremental_filter.items():
+                    if col in df.columns:
+                        df = df[df[col] > val]
             
-            if isinstance(result, pd.DataFrame):
-                yield result
-            elif isinstance(result, list):
-                yield pd.DataFrame(result)
-            elif isinstance(result, Iterator):
-                for chunk in result:
-                    if isinstance(chunk, pd.DataFrame): yield chunk
-                    elif isinstance(chunk, list): yield pd.DataFrame(chunk)
-                    else: yield pd.DataFrame([chunk])
-            else:
-                yield pd.DataFrame([result])
+            if not df.empty:
+                yield df
 
-        except Exception as e:
-            raise DataTransferError(f"Error during Python execution: {e}")
-
-    def _execute_shell(self, asset_name: str, code: str, limit: int, offset: int, **kwargs) -> Iterator[pd.DataFrame]:
+    def _execute_shell(self, asset_name: str, code: str, limit: int, offset: int, incremental_filter: Optional[Dict] = None, **kwargs) -> Iterator[pd.DataFrame]:
         """
         Executes a shell command. 
-        If 'code' looks like a file path, runs it.
-        Otherwise, writes to temp file and runs.
-        Expects stdout to be JSON Lines or CSV.
         """
         is_file = os.path.exists(code) and os.path.isfile(code)
         
@@ -160,6 +198,7 @@ class CustomScriptConnector(BaseConnector):
         # Pass limit/offset as env vars
         if limit: cmd_env['LIMIT'] = str(limit)
         if offset: cmd_env['OFFSET'] = str(offset)
+        if incremental_filter: cmd_env['INCREMENTAL_FILTER'] = json.dumps(incremental_filter)
 
         if is_file:
             script_path = code

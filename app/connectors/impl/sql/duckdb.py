@@ -1,5 +1,4 @@
-from typing import Dict, Any, Optional
-from sqlalchemy.engine.url import make_url
+from typing import Dict, Any
 from app.connectors.impl.sql.base import SQLConnector
 
 class DuckDBConnector(SQLConnector):

@@ -79,33 +79,54 @@ class RedisConnector(BaseConnector):
         **kwargs,
     ) -> Iterator[pd.DataFrame]:
         self.connect()
-        # asset is treated as a key pattern, e.g., "user:*"
         pattern = asset if asset != "*" else "*"
+        incremental_filter = kwargs.get("incremental_filter")
         
         cursor = 0
-        count = limit if limit else 1000 # Redis scan count hint
-        
-        # This is a simplified scan. Full pagination in Redis is cursor based.
-        # Implementing efficient offset in Redis SCAN is hard (O(N)).
-        # We will use SCAN for iteration.
+        count = limit if limit else 1000 
         
         keys_batch = []
-        # SCAN
-        # Note: 'offset' is ignored here because Redis SCAN doesn't support it standardly.
-        
+        rows_yielded = 0
+
         for key in self._client.scan_iter(match=pattern, count=count):
             keys_batch.append(key)
             if len(keys_batch) >= count:
-                # Fetch values
                 values = self._client.mget(keys_batch)
                 df = pd.DataFrame({"key": keys_batch, "value": values})
-                yield df
+                
+                # Apply Incremental Filter
+                if incremental_filter and isinstance(incremental_filter, dict):
+                    for col, val in incremental_filter.items():
+                        if col in df.columns:
+                            df = df[df[col] > val]
+                
+                if not df.empty:
+                    # Apply limit if needed (simplistic)
+                    if limit:
+                        remaining = limit - rows_yielded
+                        if remaining <= 0: break
+                        if len(df) > remaining: df = df.iloc[:remaining]
+                    
+                    rows_yielded += len(df)
+                    yield df
+                
                 keys_batch = []
-                if limit and limit <= 0: break # Crude limit handling
+                if limit and rows_yielded >= limit: break
         
         if keys_batch:
             values = self._client.mget(keys_batch)
-            yield pd.DataFrame({"key": keys_batch, "value": values})
+            df = pd.DataFrame({"key": keys_batch, "value": values})
+            
+            # Apply Incremental Filter
+            if incremental_filter and isinstance(incremental_filter, dict):
+                for col, val in incremental_filter.items():
+                    if col in df.columns:
+                        df = df[df[col] > val]
+            
+            if not df.empty:
+                if limit and limit - rows_yielded < len(df):
+                    df = df.iloc[:limit - rows_yielded]
+                yield df
 
 
     def write_batch(

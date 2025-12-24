@@ -22,41 +22,39 @@ class JoinTransform(BaseTransform):
         if "lookup_data" not in self.config and "lookup_file" not in self.config:
             raise ConfigurationError("JoinTransform requires 'lookup_data' or 'lookup_file'.")
 
-    def transform(self, data: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+    def transform_multi(self, data_map: Dict[str, Iterator[pd.DataFrame]]) -> Iterator[pd.DataFrame]:
         join_on = self.config["on"]
         how = self.config.get("how", "left")
         
-        # Load lookup data once
-        lookup_df = pd.DataFrame()
-        if "lookup_data" in self.config:
-            lookup_df = pd.DataFrame(self.config["lookup_data"])
-        elif "lookup_file" in self.config:
-            try:
-                # Basic file loading support
-                fp = self.config["lookup_file"]
-                if fp.endswith(".csv"):
-                    lookup_df = pd.read_csv(fp)
-                elif fp.endswith(".json"):
-                    lookup_df = pd.read_json(fp)
-            except Exception as e:
-                raise ConfigurationError(f"Failed to load lookup file: {e}")
-
-        if lookup_df.empty:
-            # Nothing to join, just yield original or empty?
-            # Yielding original implies failed join (if inner) or passed through (if left)
-            # Let's yield original if left/outer, else empty
-            for df in data:
-                 yield df if how in ["left", "outer"] else pd.DataFrame()
-            return
-
-        for df in data:
+        # Identify Left and Right inputs
+        # If we have exactly 2 inputs, arbitrary assignment if not specified
+        # Ideal: Config should specify 'right_input_id'
+        keys = list(data_map.keys())
+        if len(keys) != 2:
+            raise ConfigurationError(f"Join requires exactly 2 inputs, got {len(keys)}: {keys}")
+        
+        left_id, right_id = keys[0], keys[1]
+        
+        # Materialize Right Side (Lookup)
+        # This is necessary for standard in-memory join.
+        # Warning: High volume on right side will cause OOM.
+        right_chunks = list(data_map[right_id])
+        if not right_chunks:
+            right_df = pd.DataFrame()
+        else:
+            right_df = pd.concat(right_chunks, ignore_index=True)
+            
+        # Stream Left Side
+        left_iter = data_map[left_id]
+        
+        for df in left_iter:
             if join_on not in df.columns:
-                # Key missing, skip or yield based on join type
                 yield df if how == "left" else pd.DataFrame()
                 continue
-                
+            
             try:
-                merged = pd.merge(df, lookup_df, on=join_on, how=how)
+                # Provide suffixes to avoid collision if column names overlap
+                merged = pd.merge(df, right_df, on=join_on, how=how, suffixes=('_left', '_right'))
                 yield merged
             except Exception as e:
                  raise ConfigurationError(f"Join operation failed: {e}")

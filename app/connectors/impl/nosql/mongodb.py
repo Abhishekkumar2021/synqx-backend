@@ -139,6 +139,8 @@ class MongoDBConnector(BaseConnector):
         self.connect()
         
         custom_query = kwargs.get("query")
+        incremental_filter = kwargs.get("incremental_filter")
+        
         if custom_query:
             import json
             try:
@@ -147,8 +149,14 @@ class MongoDBConnector(BaseConnector):
                 if not collection_name:
                      raise ValueError("MongoDB query JSON must specify 'collection'.")
                 
+                # Merge incremental filter into existing filter
+                query_filter = q_obj.get("filter", {})
+                if incremental_filter and isinstance(incremental_filter, dict):
+                    for col, val in incremental_filter.items():
+                        query_filter[col] = {"$gt": val}
+
                 collection = self._db[collection_name]
-                cursor = collection.find(q_obj.get("filter", {}), q_obj.get("projection"))
+                cursor = collection.find(query_filter, q_obj.get("projection"))
                 
                 if offset: cursor = cursor.skip(offset)
                 elif q_obj.get("offset"): cursor = cursor.skip(q_obj.get("offset"))
@@ -159,7 +167,13 @@ class MongoDBConnector(BaseConnector):
                 raise DataTransferError(f"Invalid MongoDB query: {e}")
         else:
             collection = self._db[asset]
-            cursor = collection.find(kwargs.get("filter", {}), kwargs.get("projection"))
+            # Merge incremental filter into kwargs filter
+            query_filter = kwargs.get("filter", {}).copy()
+            if incremental_filter and isinstance(incremental_filter, dict):
+                for col, val in incremental_filter.items():
+                    query_filter[col] = {"$gt": val}
+
+            cursor = collection.find(query_filter, kwargs.get("projection"))
             if offset: cursor = cursor.skip(offset)
             if limit: cursor = cursor.limit(limit)
 

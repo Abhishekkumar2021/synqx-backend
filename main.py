@@ -14,6 +14,8 @@ from app.db.session import engine
 from app.core.logging import setup_logging, get_logger
 from app.middlewares.correlation import CorrelationMiddleware
 from app.models import Base
+import app.connectors.impl  # Register connectors
+import app.engine.transforms.impl  # Register transforms
 
 setup_logging()
 logger = get_logger("main")

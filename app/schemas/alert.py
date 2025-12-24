@@ -61,3 +61,9 @@ class AlertUpdate(BaseModel):
     status: Optional[AlertStatus] = None
     acknowledged_at: Optional[datetime] = None
     acknowledged_by: Optional[str] = None
+
+class AlertListResponse(BaseModel):
+    items: List[AlertRead]
+    total: int
+    limit: int
+    offset: int

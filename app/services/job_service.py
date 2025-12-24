@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, desc, func
+from sqlalchemy import desc, func
 
 from app.models.execution import Job, PipelineRun, StepRun
 from app.models.monitoring import JobLog, StepLog
@@ -134,14 +134,60 @@ class JobService:
             logger.error(f"Failed to retry job {job_id}: {e}")
             raise AppError(f"Failed to retry job: {e}")
 
-    def get_job_logs(self, job_id: int, level: Optional[str] = None) -> List[JobLog]:
-        """Get logs for a specific job."""
-        query = self.db_session.query(JobLog).filter(JobLog.job_id == job_id)
-
+    def get_job_logs(self, job_id: int, level: Optional[str] = None) -> List[dict]:
+        """Get logs for a specific job, including step logs."""
+        # 1. Fetch Job Logs
+        job_logs_query = self.db_session.query(JobLog).filter(JobLog.job_id == job_id)
         if level:
-            query = query.filter(JobLog.level == level)
+            job_logs_query = job_logs_query.filter(JobLog.level == level)
+        job_logs = job_logs_query.all()
 
-        return query.order_by(JobLog.timestamp).all()
+        # 2. Fetch Step Logs associated with this Job
+        # Find the pipeline run for this job
+        pipeline_run = self.db_session.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
+        
+        step_logs = []
+        if pipeline_run:
+            step_logs_query = (
+                self.db_session.query(StepLog)
+                .join(StepRun, StepLog.step_run_id == StepRun.id)
+                .filter(StepRun.pipeline_run_id == pipeline_run.id)
+            )
+            if level:
+                step_logs_query = step_logs_query.filter(StepLog.level == level)
+            step_logs = step_logs_query.all()
+
+        # 3. Combine and Format
+        unified_logs = []
+        
+        for log in job_logs:
+            unified_logs.append({
+                "id": log.id,
+                "level": log.level,
+                "message": log.message,
+                "metadata_payload": log.metadata_payload,
+                "timestamp": log.timestamp,
+                "source": log.source,
+                "job_id": log.job_id,
+                "type": "job_log"
+            })
+            
+        for log in step_logs:
+            unified_logs.append({
+                "id": log.id,
+                "level": log.level,
+                "message": log.message,
+                "metadata_payload": log.metadata_payload,
+                "timestamp": log.timestamp,
+                "source": log.source,
+                "step_run_id": log.step_run_id,
+                "type": "step_log"
+            })
+
+        # 4. Sort by timestamp
+        unified_logs.sort(key=lambda x: x["timestamp"])
+        
+        return unified_logs
 
 
 class PipelineRunService:
