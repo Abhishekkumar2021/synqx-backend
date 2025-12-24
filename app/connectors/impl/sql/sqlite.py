@@ -221,3 +221,24 @@ class SQLiteConnector(BaseConnector):
             return total
         except Exception as e:
             raise DataTransferError(f"Failed to write to '{asset}': {e}")
+
+    def execute_query(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        self.connect()
+        try:
+            clean_query = query.strip().rstrip(';')
+            final_query = clean_query
+            if limit and "limit" not in clean_query.lower():
+                final_query += f" LIMIT {limit}"
+            if offset and "offset" not in clean_query.lower():
+                final_query += f" OFFSET {offset}"
+            
+            df = pd.read_sql_query(text(final_query), con=self._connection, **kwargs)
+            return df.where(pd.notnull(df), None).to_dict(orient="records")
+        except Exception as e:
+            raise DataTransferError(f"SQLite query execution failed: {e}")

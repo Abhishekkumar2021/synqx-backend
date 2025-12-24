@@ -153,3 +153,12 @@ class LocalFileConnector(BaseConnector):
             return total
         except Exception as e:
             raise DataTransferError(f"Error writing to local file {asset}: {e}")
+
+    def execute_query(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError("Query execution is not supported for Local File connector.")

@@ -137,11 +137,31 @@ class MongoDBConnector(BaseConnector):
         self, asset: str, limit: Optional[int] = None, offset: Optional[int] = None, **kwargs
     ) -> Iterator[pd.DataFrame]:
         self.connect()
-        collection = self._db[asset]
         
-        cursor = collection.find(kwargs.get("filter", {}), kwargs.get("projection"))
-        if offset: cursor = cursor.skip(offset)
-        if limit: cursor = cursor.limit(limit)
+        custom_query = kwargs.get("query")
+        if custom_query:
+            import json
+            try:
+                q_obj = json.loads(custom_query)
+                collection_name = q_obj.get("collection")
+                if not collection_name:
+                     raise ValueError("MongoDB query JSON must specify 'collection'.")
+                
+                collection = self._db[collection_name]
+                cursor = collection.find(q_obj.get("filter", {}), q_obj.get("projection"))
+                
+                if offset: cursor = cursor.skip(offset)
+                elif q_obj.get("offset"): cursor = cursor.skip(q_obj.get("offset"))
+                
+                if limit: cursor = cursor.limit(limit)
+                elif q_obj.get("limit"): cursor = cursor.limit(q_obj.get("limit"))
+            except Exception as e:
+                raise DataTransferError(f"Invalid MongoDB query: {e}")
+        else:
+            collection = self._db[asset]
+            cursor = collection.find(kwargs.get("filter", {}), kwargs.get("projection"))
+            if offset: cursor = cursor.skip(offset)
+            if limit: cursor = cursor.limit(limit)
 
         chunksize = kwargs.get("chunksize", 5000)
         batch = []

@@ -116,207 +116,217 @@ class PipelineRunner:
             f"Node '{node.name}' started.",
         )
 
-        try:
-            from app.models.execution import PipelineRunContext, Watermark
+        attempts = 0
+        max_attempts = (node.max_retries or 0) + 1
+        last_exception = None
 
-            source_connector = None
-            destination_connector = None
-            source_asset = None
-            dest_asset = None
-            watermark = None
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                if attempts > 1:
+                    logger.info("Retrying node", node=node.node_id, attempt=attempts, max_attempts=max_attempts)
+                    DBLogger.log_step(db, step_run.id, "WARNING", f"Retrying node (attempt {attempts}/{max_attempts})")
 
-            # Setup source connector if needed
-            if node.source_asset_id:
-                source_asset, source_conn = self._fetch_asset_connection(
-                    db, node.source_asset_id
-                )
-                cfg = VaultService.get_connector_config(source_conn)
-                source_connector = ConnectorFactory.get_connector(
-                    source_conn.connector_type.value, cfg
-                )
-                
-                # Fetch Watermark for incremental loads
-                if source_asset.is_incremental_capable:
-                    watermark = db.query(Watermark).filter(
-                        Watermark.pipeline_id == pipeline_run.pipeline_id,
-                        Watermark.asset_id == source_asset.id
-                    ).first()
+                from app.models.execution import PipelineRunContext, Watermark
 
-            # Setup destination connector if needed
-            if node.destination_asset_id:
-                dest_asset, dest_conn = self._fetch_asset_connection(
-                    db, node.destination_asset_id
-                )
-                cfg = VaultService.get_connector_config(dest_conn)
-                destination_connector = ConnectorFactory.get_connector(
-                    dest_conn.connector_type.value, cfg
-                )
+                source_connector = None
+                destination_connector = None
+                source_asset = None
+                dest_asset = None
+                watermark = None
 
-            records_in = 0
-            records_out = 0
-            bytes_processed = 0
+                # Setup source connector if needed
+                if node.source_asset_id:
+                    source_asset, source_conn = self._fetch_asset_connection(
+                        db, node.source_asset_id
+                    )
+                    cfg = VaultService.get_connector_config(source_conn)
+                    source_connector = ConnectorFactory.get_connector(
+                        source_conn.connector_type.value, cfg
+                    )
+                    
+                    # Fetch Watermark for incremental loads
+                    if source_asset.is_incremental_capable:
+                        watermark = db.query(Watermark).filter(
+                            Watermark.pipeline_id == pipeline_run.pipeline_id,
+                            Watermark.asset_id == source_asset.id
+                        ).first()
 
-            # Determine data source
-            if source_connector and source_asset:
-                # Node reads from a source connector
-                def src_iter():
-                    nonlocal records_in, bytes_processed
-                    read_params = {"asset": source_asset.name}
-                    if watermark and watermark.last_value:
-                        read_params["incremental_filter"] = watermark.last_value
+                # Setup destination connector if needed
+                if node.destination_asset_id:
+                    dest_asset, dest_conn = self._fetch_asset_connection(
+                        db, node.destination_asset_id
+                    )
+                    cfg = VaultService.get_connector_config(dest_conn)
+                    destination_connector = ConnectorFactory.get_connector(
+                        dest_conn.connector_type.value, cfg
+                    )
 
-                    with source_connector.session() as conn:
-                        for chunk in conn.read_batch(**read_params):
-                            records_in += len(chunk)
-                            bytes_processed += int(chunk.memory_usage(deep=True).sum())
-                            yield chunk
+                records_in = 0
+                records_out = 0
+                bytes_processed = 0
 
-                data_iter = src_iter()
+                # Determine data source
+                if source_connector and source_asset:
+                    # Node reads from a source connector
+                    def src_iter():
+                        nonlocal records_in, bytes_processed
+                        read_params = {"asset": source_asset.name}
+                        
+                        # Pass asset-specific configuration (e.g., query, script, options) to the connector
+                        if source_asset.config:
+                            read_params.update(source_asset.config)
 
-            elif input_data:
-                # Node receives input from upstream nodes
-                if node.operator_type in {
-                    OperatorType.MERGE,
-                    OperatorType.UNION,
-                    OperatorType.JOIN,
-                }:
-                    # Multi-input operators need all upstream outputs
-                    # Materialize all inputs for proper handling
-                    materialized_inputs = {}
-                    for upstream_id, upstream_iter in input_data.items():
-                        materialized_inputs[upstream_id] = self._materialize_iterator(
-                            upstream_iter
+                        if watermark and watermark.last_value:
+                            read_params["incremental_filter"] = watermark.last_value
+
+                        with source_connector.session() as conn:
+                            for chunk in conn.read_batch(**read_params):
+                                records_in += len(chunk)
+                                bytes_processed += int(chunk.memory_usage(deep=True).sum())
+                                yield chunk
+
+                    data_iter = src_iter()
+
+                elif input_data:
+                    # Node receives input from upstream nodes
+                    if node.operator_type in {
+                        OperatorType.MERGE,
+                        OperatorType.UNION,
+                        OperatorType.JOIN,
+                    }:
+                        # Multi-input operators need all upstream outputs
+                        # Materialize all inputs for proper handling
+                        materialized_inputs = {}
+                        for upstream_id, upstream_iter in input_data.items():
+                            materialized_inputs[upstream_id] = self._materialize_iterator(
+                                upstream_iter
+                            )
+                            for chunk in materialized_inputs[upstream_id]:
+                                records_in += len(chunk)
+                                bytes_processed += int(chunk.memory_usage(deep=True).sum())
+
+                        # Create transform with multiple inputs
+                        transform = TransformFactory.get_transform(
+                            node.operator_class, node.config
                         )
-                        for chunk in materialized_inputs[upstream_id]:
-                            records_in += len(chunk)
-                            bytes_processed += int(chunk.memory_usage(deep=True).sum())
+                        # Pass all inputs to the transform
+                        data_iter = transform.transform_multi(materialized_inputs)
 
-                    # Create transform with multiple inputs
+                    else:
+                        # Single-input operators: use first available upstream output
+                        upstream_iter = next(iter(input_data.values()))
+
+                        def upstream_iter_wrapper():
+                            nonlocal records_in, bytes_processed
+                            for chunk in upstream_iter:
+                                records_in += len(chunk)
+                                bytes_processed += int(chunk.memory_usage(deep=True).sum())
+                                yield chunk
+
+                        data_iter = upstream_iter_wrapper()
+                else:
+                    # No input data
+                    data_iter = iter([])
+
+                # Apply transformation if needed
+                transformed = data_iter
+                if node.operator_type == OperatorType.TRANSFORM:
                     transform = TransformFactory.get_transform(
                         node.operator_class, node.config
                     )
-                    # Pass all inputs to the transform
-                    data_iter = transform.transform_multi(materialized_inputs)
+                    transformed = transform.transform(data_iter)
 
+                # Write to destination if needed
+                if destination_connector and dest_asset:
+                    with destination_connector.session() as conn:
+                        records_out = conn.write_batch(
+                            data=transformed, asset=dest_asset.name
+                        )
+                    
+                    # Update Watermark on success
+                    if source_asset and source_asset.is_incremental_capable:
+                        if not watermark:
+                            watermark = Watermark(
+                                pipeline_id=pipeline_run.pipeline_id,
+                                asset_id=source_asset.id,
+                                watermark_type="timestamp"
+                            )
+                            db.add(watermark)
+                        
+                        # For demo purposes, we update the watermark to current time
+                        # In a real system, we'd extract the max value from the data
+                        watermark.last_value = {"timestamp": datetime.now(timezone.utc).isoformat()}
+                        watermark.last_updated = datetime.now(timezone.utc)
+
+                    transformed = None  # Data consumed by destination
                 else:
-                    # Single-input operators: use first available upstream output
-                    upstream_iter = next(iter(input_data.values()))
+                    # Count records for pass-through nodes
+                    iterator_to_count = transformed
 
-                    def upstream_iter_wrapper():
-                        nonlocal records_in, bytes_processed
-                        for chunk in upstream_iter:
-                            records_in += len(chunk)
-                            bytes_processed += int(chunk.memory_usage(deep=True).sum())
+                    def counting_iter():
+                        nonlocal records_out, bytes_processed
+                        for chunk in iterator_to_count:
+                            records_out += len(chunk)
                             yield chunk
 
-                    data_iter = upstream_iter_wrapper()
-            else:
-                # No input data
-                data_iter = iter([])
+                    if transformed is not None:
+                        transformed = counting_iter()
 
-            # Apply transformation if needed
-            transformed = data_iter
-            if node.operator_type == OperatorType.TRANSFORM:
-                transform = TransformFactory.get_transform(
-                    node.operator_class, node.config
+                # Update step run with results
+                step_run.records_in = records_in
+                step_run.records_out = records_out
+                step_run.bytes_processed = bytes_processed
+                step_run.status = OperatorRunStatus.SUCCESS
+                step_run.completed_at = datetime.now(timezone.utc)
+                if step_run.started_at:
+                    step_run.duration_seconds = (
+                        step_run.completed_at - step_run.started_at
+                    ).total_seconds()
+
+                db.add(step_run)
+
+                logger.info(
+                    "Node completed",
+                    node=node.node_id,
+                    records_in=records_in,
+                    records_out=records_out,
                 )
-                transformed = transform.transform(data_iter)
+                DBLogger.log_step(
+                    db,
+                    step_run.id,
+                    "INFO",
+                    f"Completed. In={records_in}, Out={records_out}",
+                )
 
-            # Write to destination if needed
-            if destination_connector and dest_asset:
-                with destination_connector.session() as conn:
-                    records_out = conn.write_batch(
-                        data=transformed, asset=dest_asset.name
-                    )
+                return transformed
+
+            except Exception as e:
+                last_exception = e
+                # Wait before retry if needed? For now immediate retry.
+                import time
+                if attempts < max_attempts:
+                    time.sleep(1) # Small delay
+                    continue
                 
-                # Update Watermark on success
-                if source_asset and source_asset.is_incremental_capable:
-                    if not watermark:
-                        watermark = Watermark(
-                            pipeline_id=pipeline_run.pipeline_id,
-                            asset_id=source_asset.id,
-                            watermark_type="timestamp"
-                        )
-                        db.add(watermark)
-                    
-                    # For demo purposes, we update the watermark to current time
-                    # In a real system, we'd extract the max value from the data
-                    watermark.last_value = {"timestamp": datetime.now(timezone.utc).isoformat()}
-                    watermark.last_updated = datetime.now(timezone.utc)
+                step_run.status = OperatorRunStatus.FAILED
+                step_run.completed_at = datetime.now(timezone.utc)
+                if step_run.started_at:
+                    step_run.duration_seconds = (
+                        step_run.completed_at - step_run.started_at
+                    ).total_seconds()
+                step_run.error_message = str(e)
+                step_run.error_type = type(e).__name__
+                db.add(step_run)
 
-                transformed = None  # Data consumed by destination
-            else:
-                # Count records for pass-through nodes
-                iterator_to_count = transformed
-
-                def counting_iter():
-                    nonlocal records_out, bytes_processed
-                    # If bytes_processed was already counted in src/upstream, we might double count if we count here again for pass-through?
-                    # But transformed data might have different size.
-                    # Usually we want bytes *processed* by this step.
-                    # If it's a transform, input bytes are counted in input loop. Output bytes?
-                    # Let's count output bytes here.
-                    
-                    for chunk in iterator_to_count:
-                        records_out += len(chunk)
-                        # We accumulate bytes processed as input bytes + output bytes? 
-                        # Or just input bytes? usually bytes processed means input volume.
-                        # But for a generator, we only know input size when we iterate.
-                        # The `upstream_iter_wrapper` counts input bytes.
-                        # If we have a transform, it consumes input (counting input bytes) and yields output.
-                        # So `bytes_processed` will contain input bytes.
-                        yield chunk
-
-                if transformed is not None:
-                    transformed = counting_iter()
-
-            # Update step run with results
-            step_run.records_in = records_in
-            step_run.records_out = records_out
-            step_run.bytes_processed = bytes_processed
-            step_run.status = OperatorRunStatus.SUCCESS
-            step_run.completed_at = datetime.now(timezone.utc)
-            if step_run.started_at:
-                step_run.duration_seconds = (
-                    step_run.completed_at - step_run.started_at
-                ).total_seconds()
-
-            db.add(step_run)
-
-            logger.info(
-                "Node completed",
-                node=node.node_id,
-                records_in=records_in,
-                records_out=records_out,
-            )
-            DBLogger.log_step(
-                db,
-                step_run.id,
-                "INFO",
-                f"Completed. In={records_in}, Out={records_out}",
-            )
-
-            return transformed
-
-        except Exception as e:
-            step_run.status = OperatorRunStatus.FAILED
-            step_run.completed_at = datetime.now(timezone.utc)
-            if step_run.started_at:
-                step_run.duration_seconds = (
-                    step_run.completed_at - step_run.started_at
-                ).total_seconds()
-            step_run.error_message = str(e)
-            step_run.error_type = type(e).__name__
-            db.add(step_run)
-
-            DBLogger.log_step(
-                db,
-                step_run.id,
-                "ERROR",
-                f"Step failed: {e}",
-            )
-            logger.error("Node failed", node=node.node_id, error=str(e))
-            raise
+                DBLogger.log_step(
+                    db,
+                    step_run.id,
+                    "ERROR",
+                    f"Step failed after {attempts} attempts: {e}",
+                )
+                logger.error("Node failed permanently", node=node.node_id, attempts=attempts, error=str(e))
+                raise last_exception
 
     def run(self, pipeline_version: PipelineVersion, db: Session, job_id: int) -> None:
         logger.info(

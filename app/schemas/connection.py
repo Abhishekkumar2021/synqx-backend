@@ -1,6 +1,6 @@
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, ConfigDict, model_validator
 from app.models.enums import ConnectorType
 
 
@@ -25,12 +25,13 @@ class ConnectionCreate(ConnectionBase):
         ..., description="Connection configuration (will be encrypted)"
     )
 
-    @field_validator("config")
-    @classmethod
-    def validate_config(cls, v: Dict[str, Any]) -> Dict[str, Any]:
-        if not v:
+    @model_validator(mode='after')
+    def validate_connection_config(self) -> 'ConnectionCreate':
+        # Allow empty config for connectors that rely on asset-defined logic
+        allowed_empty = [ConnectorType.CUSTOM_SCRIPT, ConnectorType.LOCAL_FILE]
+        if self.connector_type not in allowed_empty and not self.config:
             raise ValueError("Connection config cannot be empty")
-        return v
+        return self
 
 
 class ConnectionUpdate(BaseModel):

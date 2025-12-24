@@ -169,12 +169,22 @@ class SQLConnector(BaseConnector):
         self, asset: str, limit: Optional[int] = None, offset: Optional[int] = None, **kwargs
     ) -> Iterator[pd.DataFrame]:
         self.connect()
-        schema = self.config.get("db_schema") or self.config.get("schema")
-        table_ref = f'{schema}.{asset}' if schema else f'{asset}'
         
-        query = f"SELECT * FROM {table_ref}"
-        if limit: query += f" LIMIT {limit}"
-        if offset: query += f" OFFSET {offset}"
+        custom_query = kwargs.get("query")
+        if custom_query:
+            clean_query = custom_query.strip().rstrip(';')
+            if limit and "limit" not in clean_query.lower():
+                clean_query += f" LIMIT {limit}"
+            if offset and "offset" not in clean_query.lower():
+                clean_query += f" OFFSET {offset}"
+            query = clean_query
+        else:
+            schema = self.config.get("db_schema") or self.config.get("schema")
+            table_ref = f'{schema}.{asset}' if schema else f'{asset}'
+            
+            query = f"SELECT * FROM {table_ref}"
+            if limit: query += f" LIMIT {limit}"
+            if offset: query += f" OFFSET {offset}"
         
         chunksize = kwargs.pop("chunksize", 10000)
         try:

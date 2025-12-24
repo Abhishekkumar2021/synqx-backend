@@ -35,6 +35,7 @@ class Pipeline(Base, AuditMixin, SoftDeleteMixin, OwnerMixin):
     )
 
     max_parallel_runs: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     execution_timeout_seconds: Mapped[Optional[int]] = mapped_column(Integer)
     tags: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
     priority: Mapped[int] = mapped_column(Integer, default=5, nullable=False)

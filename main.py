@@ -70,6 +70,13 @@ app.add_middleware(CorrelationMiddleware)
 async def validation_handler(request: Request, exc: RequestValidationError):
     errors = exc.errors()
     for error in errors:
+        # Remove 'ctx' which may contain non-serializable objects (like Exceptions)
+        error.pop("ctx", None)
+        
+        # Ensure 'url' is serializable if present
+        if "url" in error:
+            error["url"] = str(error["url"])
+
         if "input" in error and isinstance(error["input"], bytes):
             try:
                 error["input"] = error["input"].decode("utf-8")

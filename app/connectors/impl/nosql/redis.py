@@ -137,3 +137,12 @@ class RedisConnector(BaseConnector):
                 except Exception as e:
                     raise DataTransferError(f"Redis write failed: {e}")
         return total
+
+    def execute_query(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError("Direct query execution is not supported for Redis connector. Use key patterns as assets.")

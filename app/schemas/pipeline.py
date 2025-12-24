@@ -182,6 +182,7 @@ class PipelineBase(BaseModel):
     schedule_enabled: bool = Field(default=False)
     schedule_timezone: str = Field(default="UTC", max_length=50)
     max_parallel_runs: int = Field(default=1, ge=1, le=100)
+    max_retries: int = Field(default=3, ge=0, le=10)
     execution_timeout_seconds: Optional[int] = Field(None, gt=0, le=86400)
     tags: Optional[Dict[str, Any]] = Field(default_factory=dict)
     priority: int = Field(default=5, ge=1, le=10)
@@ -231,6 +232,7 @@ class PipelineUpdate(BaseModel):
     schedule_timezone: Optional[str] = Field(None, max_length=50)
     status: Optional[PipelineStatus] = None
     max_parallel_runs: Optional[int] = Field(None, ge=1, le=100)
+    max_retries: Optional[int] = Field(None, ge=0, le=10)
     execution_timeout_seconds: Optional[int] = Field(None, gt=0, le=86400)
     tags: Optional[Dict[str, Any]] = None
     priority: Optional[int] = Field(None, ge=1, le=10)

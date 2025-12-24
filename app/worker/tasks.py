@@ -136,6 +136,15 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 logger.error(error_msg, extra={"job_id": job_id})
                 _mark_job_failed(session, job, error_msg, is_infra_error=True)
                 return error_msg
+            
+            pipeline = pipeline_version.pipeline
+
+            # Dynamic Timeout Handling
+            if pipeline and pipeline.execution_timeout_seconds:
+                # Note: Celery doesn't support changing timeout of a RUNNING task easily 
+                # but we can check elapsed time inside the loop or use this info for retries.
+                # Here we mainly ensure the task metadata is aware or we log it.
+                logger.info(f"Pipeline has execution timeout set to {pipeline.execution_timeout_seconds}s")
 
             # Validate pipeline version has nodes
             if not pipeline_version.nodes:
@@ -476,7 +485,7 @@ def _mark_job_retrying(session, job: Job, error_message: str) -> None:
 
 def _should_retry_job(job: Job, error: Exception, retry_count: int) -> bool:
     """
-    Determine if a job should be retried based on error type and job configuration.
+    Determine if a job should be retried based on error type and pipeline configuration.
     """
     # Don't retry certain error types
     non_retryable_errors = (
@@ -490,9 +499,14 @@ def _should_retry_job(job: Job, error: Exception, retry_count: int) -> bool:
         )
         return False
 
-    # Check job-specific retry strategy if available
-    # max_retries is a direct attribute on Job model
-    if hasattr(job, "max_retries"):
+    # Check pipeline-specific retry count
+    if job.pipeline and job.pipeline.max_retries is not None:
+        if retry_count >= job.pipeline.max_retries:
+            logger.info(f"Job {job.id} reached max pipeline retries ({job.pipeline.max_retries})")
+            return False
+    
+    # Fallback to job model max_retries if pipeline not loaded or missing attribute
+    elif hasattr(job, "max_retries") and job.max_retries is not None:
         if retry_count >= job.max_retries:
             return False
 

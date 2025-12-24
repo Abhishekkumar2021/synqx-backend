@@ -182,3 +182,12 @@ class S3Connector(BaseConnector):
             df.to_parquet(path, index=False, storage_options=options)
         elif fmt in ('json', 'jsonl'):
             df.to_json(path, orient='records', lines=(fmt == 'jsonl'), storage_options=options)
+
+    def execute_query(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError("Query execution is not supported for S3 connector.")

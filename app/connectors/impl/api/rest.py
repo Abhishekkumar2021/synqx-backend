@@ -150,3 +150,12 @@ class RestApiConnector(BaseConnector):
                 except Exception as e:
                     logger.error(f"Failed to write record: {e}")
         return total
+
+    def execute_query(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError("Direct query execution is not supported for REST API connector. Use endpoints as assets.")
