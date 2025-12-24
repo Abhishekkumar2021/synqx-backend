@@ -61,6 +61,7 @@ class PipelineService:
                 schedule_enabled=pipeline_create.schedule_enabled or False,
                 schedule_timezone=pipeline_create.schedule_timezone,
                 max_parallel_runs=pipeline_create.max_parallel_runs or 1,
+                max_retries=pipeline_create.max_retries or 3,
                 execution_timeout_seconds=pipeline_create.execution_timeout_seconds,
                 tags=pipeline_create.tags,
                 priority=pipeline_create.priority or 0,
@@ -216,6 +217,18 @@ class PipelineService:
             pipeline.schedule_cron = pipeline_update.schedule_cron
         if pipeline_update.schedule_enabled is not None:
             pipeline.schedule_enabled = pipeline_update.schedule_enabled
+        if pipeline_update.schedule_timezone is not None:
+            pipeline.schedule_timezone = pipeline_update.schedule_timezone
+        if pipeline_update.status is not None:
+            pipeline.status = pipeline_update.status
+        if pipeline_update.max_parallel_runs is not None:
+            pipeline.max_parallel_runs = pipeline_update.max_parallel_runs
+        if pipeline_update.max_retries is not None:
+            pipeline.max_retries = pipeline_update.max_retries
+        if pipeline_update.execution_timeout_seconds is not None:
+            pipeline.execution_timeout_seconds = pipeline_update.execution_timeout_seconds
+        if pipeline_update.priority is not None:
+            pipeline.priority = pipeline_update.priority
         if pipeline_update.tags is not None:
             pipeline.tags = pipeline_update.tags
 

@@ -113,10 +113,11 @@ class Scheduler:
         last_trigger_time = self._get_last_scheduled_trigger_time(pipeline.id)
 
         # Check if there's a pending or running job to prevent duplicate triggers
-        if self._has_active_job(pipeline.id):
+        active_jobs_count = self._get_active_jobs_count(pipeline.id)
+        if active_jobs_count >= (pipeline.max_parallel_runs or 1):
             logger.debug(
-                f"Pipeline {pipeline.id} has active job. Skipping trigger.",
-                extra={"pipeline_id": pipeline.id},
+                f"Pipeline {pipeline.id} has reached max parallel runs ({pipeline.max_parallel_runs}). Skipping trigger.",
+                extra={"pipeline_id": pipeline.id, "active_jobs": active_jobs_count},
             )
             return False
 
@@ -270,12 +271,12 @@ class Scheduler:
 
         return start_time
 
-    def _has_active_job(self, pipeline_id: int) -> bool:
+    def _get_active_jobs_count(self, pipeline_id: int) -> int:
         """
-        Check if pipeline has any pending or running jobs.
-        Prevents duplicate triggers while a job is already executing.
+        Get the count of pending or running jobs for a pipeline.
+        Used to enforce concurrency limits.
         """
-        active_job = (
+        return (
             self.db_session.query(Job)
             .filter(
                 and_(
@@ -283,10 +284,8 @@ class Scheduler:
                     Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
                 )
             )
-            .first()
+            .count()
         )
-
-        return active_job is not None
 
     def _trigger_scheduled_run(
         self, pipeline: Pipeline, scheduled_time: datetime
