@@ -251,6 +251,28 @@ class ConnectionService:
 
         return ConnectionTestResponse(**result)
 
+    def get_environment_info(self, connection_id: int, user_id: Optional[int] = None) -> Dict[str, Any]:
+        connection = self.get_connection(connection_id, user_id=user_id)
+        if not connection:
+            raise AppError(f"Connection {connection_id} not found")
+
+        try:
+            config = VaultService.get_connector_config(connection)
+            connector = ConnectorFactory.get_connector(
+                connection.connector_type.value, config
+            )
+            
+            # Not all connectors have get_environment_info, so we check
+            if hasattr(connector, "get_environment_info"):
+                return connector.get_environment_info()
+            
+            return {
+                "details": {"message": f"Environment information not supported for {connection.connector_type.value} connector type"}
+            }
+        except Exception as e:
+            logger.error(f"Error fetching environment info for connection {connection_id}: {e}")
+            raise AppError(f"Failed to fetch environment info: {str(e)}")
+
     def _test_connection_internal(self, connection: Connection) -> Dict[str, Any]:
         start = time.time()
         try:

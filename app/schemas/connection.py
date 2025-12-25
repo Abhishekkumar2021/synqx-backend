@@ -247,3 +247,14 @@ class ConnectionUsageStatsRead(BaseModel):
     data_extracted_gb_24h: Optional[float]
     last_24h_runs: int
     last_7d_runs: int
+
+
+class ConnectionEnvironmentInfo(BaseModel):
+    python_version: Optional[str] = None
+    platform: Optional[str] = None
+    pandas_version: Optional[str] = None
+    numpy_version: Optional[str] = None
+    base_path: Optional[str] = None
+    available_tools: Dict[str, str] = Field(default_factory=dict)
+    installed_packages: Dict[str, str] = Field(default_factory=dict)
+    details: Dict[str, Any] = Field(default_factory=dict)

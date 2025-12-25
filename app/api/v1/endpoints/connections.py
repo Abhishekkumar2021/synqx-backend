@@ -27,6 +27,7 @@ from app.schemas.connection import (
     ConnectionUsageStatsRead,
     AssetBulkCreate,
     AssetBulkCreateResponse,
+    ConnectionEnvironmentInfo,
 )
 from app.services.connection_service import ConnectionService
 from app.services.vault_service import VaultService
@@ -813,5 +814,37 @@ def get_connection_usage_stats(
             detail={
                 "error": "Internal server error",
                 "message": "Failed to fetch connection usage stats",
+            },
+        )
+
+
+@router.get(
+    "/{connection_id}/environment",
+    response_model=ConnectionEnvironmentInfo,
+    summary="Get Connection Environment Info",
+    description="Get detailed environment information (versions, tools) for the connector",
+)
+def get_connection_environment(
+    connection_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        service = ConnectionService(db)
+        info = service.get_environment_info(connection_id, user_id=current_user.id)
+        return info
+    except AppError as e:
+        logger.error(f"Error fetching environment info for {connection_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Bad request", "message": str(e)},
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching environment info: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal server error",
+                "message": "Failed to fetch environment information",
             },
         )

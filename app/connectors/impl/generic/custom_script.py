@@ -1,12 +1,20 @@
-from typing import Any, Dict, List, Optional, Iterator
+from typing import Any, Dict, List, Optional, Iterator, Set
 import pandas as pd
 import numpy as np
 import subprocess
 import tempfile
 import os
+import sys
 import json
 import inspect
 import random
+import ast
+import importlib.util
+from importlib import metadata
+import shutil
+import io
+import time
+from contextlib import redirect_stdout
 from app.connectors.base import BaseConnector
 from app.core.errors import (
     ConfigurationError,
@@ -26,11 +34,15 @@ class CustomScriptConnector(BaseConnector):
     def __init__(self, config: Dict[str, Any]):
         self.base_path = config.get("base_path", "/tmp")
         self.env_vars = config.get("env_vars", {})
+        self.timeout = config.get("timeout", 300) # Default 5 mins
         super().__init__(config)
 
     def validate_config(self) -> None:
-        # Connection config might be empty or just env vars
-        pass
+        if not os.path.exists(self.base_path):
+            try:
+                os.makedirs(self.base_path, exist_ok=True)
+            except Exception as e:
+                logger.warning(f"Could not create base_path {self.base_path}: {e}")
 
     def connect(self) -> None:
         pass
@@ -38,18 +50,95 @@ class CustomScriptConnector(BaseConnector):
     def disconnect(self) -> None:
         pass
 
+    def _get_python_imports(self, code: str) -> Set[str]:
+        """Parses Python code to find imported modules."""
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return set()
+
+        imports = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imports.add(alias.name.split('.')[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imports.add(node.module.split('.')[0])
+        return imports
+
+    def _check_python_dependencies(self, code: str) -> List[str]:
+        """Checks if imported modules are available in the environment."""
+        needed = self._get_python_imports(code)
+        missing = []
+        for module_name in needed:
+            try:
+                if module_name in sys.builtin_module_names:
+                    continue
+                spec = importlib.util.find_spec(module_name)
+                if spec is None:
+                    missing.append(module_name)
+            except (ImportError, ValueError, AttributeError):
+                pass
+        return missing
+
+    def get_environment_info(self) -> Dict[str, Any]:
+        """Returns details about the execution environment."""
+        installed_packages = {dist.metadata['Name']: dist.version for dist in metadata.distributions()}
+        
+        info = {
+            "python_version": sys.version,
+            "platform": sys.platform,
+            "pandas_version": pd.__version__,
+            "numpy_version": np.__version__,
+            "base_path": self.base_path,
+            "available_tools": {},
+            "installed_packages": installed_packages
+        }
+        
+        # Check standard data tools if they exist
+        common_tools = [
+            "jq", "curl", "wget", "aws", "gcloud", "psql", "mysql", 
+            "git", "docker", "kubectl", "grep", "sed", "awk", "tar", 
+            "zip", "unzip", "node", "npm", "java", "go", "python3", "pip"
+        ]
+        if self.config.get("required_tools"):
+            common_tools.extend(self.config["required_tools"])
+            
+        for tool in set(common_tools):
+            path = shutil.which(tool)
+            if path:
+                info["available_tools"][tool] = path
+                
+        return info
+
     def test_connection(self) -> bool:
         """
         Tests if the execution environment is ready.
-        Tries to run a simple python command.
+        Checks if required dependencies for a configured script are present.
         """
         try:
-            # Simple check if we can run python code
-            test_code = "print('ok')"
-            # Reuse execute logic or just run subprocess directly for speed
-            # Since we have _execute_python, let's try to verify imports work
+            env_info = self.get_environment_info()
+            logger.info(f"Custom Script Environment: Python {env_info['python_version']}, Pandas {env_info['pandas_version']}")
+
+            # 1. Basic Python Environment Check
             local_scope = {"pd": pd, "np": np}
             exec("import pandas as pd; import numpy as np", local_scope)
+
+            # 2. Check dependencies if code is provided in config
+            if self.config.get("code") and self.config.get("language") == "python":
+                missing = self._check_python_dependencies(self.config["code"])
+                if missing:
+                    logger.error(f"Missing Python dependencies: {', '.join(missing)}")
+                    return False
+
+            # 3. Check for shell tools if specified
+            if self.config.get("required_tools"):
+                for tool in self.config["required_tools"]:
+                    if tool not in env_info["available_tools"]:
+                        logger.error(f"Missing required shell tool: {tool}")
+                        return False
+
             return True
         except Exception as e:
             logger.error(f"Custom Script environment check failed: {e}")
@@ -61,8 +150,28 @@ class CustomScriptConnector(BaseConnector):
         include_metadata: bool = False,
         **kwargs
     ) -> List[Dict[str, Any]]:
-        # Discovery is not primary mode for this connector
-        return []
+        """Lists available script files in the base_path."""
+        assets = []
+        if not os.path.exists(self.base_path):
+            return []
+            
+        for entry in os.scandir(self.base_path):
+            if entry.is_file() and (entry.name.endswith(".py") or entry.name.endswith(".sh")):
+                if pattern and pattern not in entry.name:
+                    continue
+                    
+                asset_info = {
+                    "name": entry.name,
+                    "type": "python" if entry.name.endswith(".py") else "shell",
+                    "path": entry.path
+                }
+                
+                if include_metadata:
+                    asset_info["size"] = entry.stat().st_size
+                    asset_info["last_modified"] = entry.stat().st_mtime
+                    
+                assets.append(asset_info)
+        return assets
 
     def infer_schema(
         self,
@@ -118,7 +227,12 @@ class CustomScriptConnector(BaseConnector):
         """
         Executes Python code in-process. 
         """
-        from datetime import datetime, timedelta
+        # Pre-check dependencies
+        missing_deps = self._check_python_dependencies(code)
+        if missing_deps:
+            logger.warning(f"Script '{asset_name}' imports modules that seem missing: {missing_deps}")
+
+        from datetime import datetime, timedelta, timezone
         local_scope = {
             "pd": pd,
             "pandas": pd,
@@ -127,12 +241,23 @@ class CustomScriptConnector(BaseConnector):
             "timedelta": timedelta,
             "random": random,
             "os": os,
-            "np": numpy,
-            "numpy": numpy,
+            "np": np,
+            "numpy": np,
+            "logger": logger,
         }
         
+        # Capture stdout
+        f = io.StringIO()
         try:
-            exec(code, local_scope)
+            with redirect_stdout(f):
+                exec(code, local_scope)
+            
+            stdout_val = f.getvalue()
+            if stdout_val:
+                logger.info(f"Script '{asset_name}' stdout: {stdout_val.strip()}")
+                
+        except ImportError as e:
+             raise DataTransferError(f"Missing dependency in Python script: {e}. Detected missing: {missing_deps}")
         except Exception as e:
             raise DataTransferError(f"Failed to compile/execute Python script: {e}")
 
@@ -140,8 +265,6 @@ class CustomScriptConnector(BaseConnector):
         func = local_scope.get(asset_name) or local_scope.get("extract") or local_scope.get("main")
         
         if not func or not callable(func):
-            # Fallback: Did the script produce a variable named 'data' or 'df'?
-            # We wrap this in an iterator to apply filtering below consistently
             def variable_yielder():
                 if "df" in local_scope and isinstance(local_scope["df"], pd.DataFrame):
                     yield local_scope["df"]
@@ -151,27 +274,22 @@ class CustomScriptConnector(BaseConnector):
                     raise DataTransferError(f"No callable function ('{asset_name}', 'extract', 'main') or 'df'/'data' variable found in script.")
             
             result_iter = variable_yielder()
-            filter_consumed = False # Variable approach can't consume args
+            filter_consumed = False
         else:
-            # Call the function
             try:
-                # Inspect signature to pass args if accepted
                 sig = inspect.signature(func)
                 call_args = {}
                 if 'limit' in sig.parameters: call_args['limit'] = limit
                 if 'offset' in sig.parameters: call_args['offset'] = offset
                 if 'incremental_filter' in sig.parameters: call_args['incremental_filter'] = incremental_filter
                 
-                # Pass kwargs too if they match
                 for k,v in kwargs.items():
                     if k in sig.parameters: call_args[k] = v
 
-                # Check if the user function accepted the filter
                 filter_consumed = 'incremental_filter' in call_args
 
                 result = func(**call_args)
                 
-                # Normalize result to iterator
                 if isinstance(result, pd.DataFrame):
                     result_iter = iter([result])
                 elif isinstance(result, list):
@@ -189,9 +307,7 @@ class CustomScriptConnector(BaseConnector):
             df = chunk if isinstance(chunk, pd.DataFrame) else pd.DataFrame(chunk)
             
             if not filter_consumed and incremental_filter and isinstance(incremental_filter, dict):
-                # Fallback: Apply filter in memory since script didn't accept it
                 for col, val in incremental_filter.items():
-                    # Ensure val is a scalar
                     if isinstance(val, (list, tuple, np.ndarray)) and len(val) > 0:
                         val = val[0]
                     elif isinstance(val, dict) and len(val) > 0:
@@ -201,13 +317,10 @@ class CustomScriptConnector(BaseConnector):
                         series = df[col]
                         try:
                             if pd.api.types.is_numeric_dtype(series):
-                                # Robust numeric conversion
                                 if isinstance(val, str):
                                     threshold = float(val.strip().replace(',', ''))
                                 else:
                                     threshold = float(val)
-                                
-                                # Use .values for reliability
                                 df = df[series.values > threshold]
                             elif pd.api.types.is_datetime64_any_dtype(series):
                                 threshold = pd.to_datetime(val)
@@ -215,7 +328,6 @@ class CustomScriptConnector(BaseConnector):
                                     threshold = threshold.replace(tzinfo=timezone.utc)
                                 df = df[pd.to_datetime(series) > threshold]
                             else:
-                                # String comparison fallback
                                 df = df[series.astype(str).values > str(val)]
                         except (ValueError, TypeError) as e:
                             logger.warning(f"Fallback filter failed for column '{col}': {e}")
@@ -255,7 +367,17 @@ class CustomScriptConnector(BaseConnector):
             
             batch = []
             chunk_size = 5000
-            for line in process.stdout:
+            start_time = time.time()
+            
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                
+                if time.time() - start_time > self.timeout:
+                    process.kill()
+                    raise DataTransferError(f"Shell script timed out after {self.timeout}s")
+
                 if not line.strip(): continue
                 try:
                     batch.append(json.loads(line))
@@ -266,11 +388,15 @@ class CustomScriptConnector(BaseConnector):
                     batch = []
             
             if batch: yield pd.DataFrame(batch)
-            process.wait()
+            
             if process.returncode != 0:
                 stderr = process.stderr.read()
-                raise DataTransferError(f"Shell script failed (Exit {process.returncode}): {stderr}")
+                msg = f"Shell script failed (Exit {process.returncode}): {stderr}"
+                if process.returncode == 127:
+                    msg += " (Command not found - check if the required tools are installed in the environment)"
+                raise DataTransferError(msg)
         except Exception as e:
+            if isinstance(e, DataTransferError): raise
             raise DataTransferError(f"Shell execution error: {e}")
         finally:
             if not is_file and os.path.exists(script_path):
