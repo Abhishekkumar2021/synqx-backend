@@ -10,7 +10,7 @@ from sqlalchemy import and_, or_, func, distinct
 from app.models.connections import Connection, Asset, AssetSchemaVersion
 from app.models.pipelines import Pipeline, PipelineVersion, PipelineNode
 from app.models.execution import Job, PipelineRun
-from app.models.enums import ConnectorType, JobStatus
+from app.models.enums import ConnectorType, JobStatus, AssetType
 from app.schemas.connection import (
     ConnectionCreate,
     ConnectionUpdate,
@@ -27,6 +27,7 @@ from app.services.vault_service import VaultService
 from app.connectors.factory import ConnectorFactory
 from app.core.logging import get_logger
 from app.core.cache import cache
+from app.services.dependency_service import DependencyService
 
 logger = get_logger(__name__)
 
@@ -257,18 +258,68 @@ class ConnectionService:
             raise AppError(f"Connection {connection_id} not found")
 
         try:
+            # 1. Get System Tools & General Info from Connector
             config = VaultService.get_connector_config(connection)
+            # Inject execution context if available (though for general info it might not be strictly needed, 
+            # but CustomScriptConnector uses it to check node versions etc)
+            dep_service = DependencyService(self.db_session, connection_id)
+            
+            # We can't easily inject execution_context into config passed to Factory 
+            # because Factory instantiates the class. We can update config dict.
+            # But wait, CustomScriptConnector's get_environment_info logic for node/ruby 
+            # relies on execution_context being set in __init__.
+            
+            # Let's get generic system info
             connector = ConnectorFactory.get_connector(
                 connection.connector_type.value, config
             )
             
-            # Not all connectors have get_environment_info, so we check
+            sys_info = {}
             if hasattr(connector, "get_environment_info"):
-                return connector.get_environment_info()
+                # This returns system-level python ver, pandas ver, and tools like jq/curl
+                sys_info = connector.get_environment_info()
+
+            # 2. Get Managed Environment Info from DependencyService
+            # This covers isolated environments for Python, Node, Ruby, etc.
             
-            return {
-                "details": {"message": f"Environment information not supported for {connection.connector_type.value} connector type"}
+            env_info = {
+                "base_path": sys_info.get("base_path"),
+                "available_tools": sys_info.get("available_tools", {}),
+                "installed_packages": {}, # Default for Python (system)
+                "npm_packages": {},
+                "initialized_languages": []
             }
+
+            # Merge System Python info if no isolated env
+            if sys_info.get("python_version"):
+                env_info["python_version"] = sys_info["python_version"]
+                env_info["platform"] = sys_info.get("platform")
+                env_info["pandas_version"] = sys_info.get("pandas_version")
+                env_info["numpy_version"] = sys_info.get("numpy_version")
+                env_info["installed_packages"] = sys_info.get("installed_packages", {})
+
+            # Check Database for Managed Environments
+            languages = ["python", "node"]
+            for lang in languages:
+                env = dep_service.get_environment(lang)
+                if env and env.status == "ready":
+                    env_info["initialized_languages"].append(lang)
+                    
+                    # Override/Set versions from managed envs
+                    if lang == "python":
+                        env_info["python_version"] = f"{env.version} (Isolated)"
+                        env_info["installed_packages"] = env.packages or {}
+                    elif lang == "node":
+                        env_info["node_version"] = f"{env.version} (Isolated)"
+                        env_info["npm_packages"] = env.packages or {}
+
+            # If not isolated, fallback to system detection from connector for these langs
+            if "node" not in env_info["initialized_languages"] and sys_info.get("node_version"):
+                env_info["node_version"] = sys_info["node_version"]
+                env_info["npm_packages"] = sys_info.get("npm_packages", {})
+                
+            return env_info
+
         except Exception as e:
             logger.error(f"Error fetching environment info for connection {connection_id}: {e}")
             raise AppError(f"Failed to fetch environment info: {str(e)}")
@@ -277,6 +328,20 @@ class ConnectionService:
         start = time.time()
         try:
             config = VaultService.get_connector_config(connection)
+            
+            # Inject Execution Context for Custom Script
+            if connection.connector_type == ConnectorType.CUSTOM_SCRIPT:
+                dep_service = DependencyService(self.db_session, connection.id)
+                # We need to gather contexts for all relevant languages
+                # For simplicity, we get context for the configured language if possible, 
+                # or merge all. CustomScriptConnector checks specific keys.
+                # Let's merge python, node etc.
+                exec_ctx = {}
+                exec_ctx.update(dep_service.get_execution_context("python"))
+                exec_ctx.update(dep_service.get_execution_context("node"))
+                
+                config["execution_context"] = exec_ctx
+
             connector = ConnectorFactory.get_connector(
                 connection.connector_type.value, config
             )
@@ -342,7 +407,7 @@ class ConnectionService:
     def list_assets(
         self,
         connection_id: Optional[int] = None,
-        asset_type: Optional[str] = None,
+        asset_type: Optional[AssetType] = None,
         is_source: Optional[bool] = None,
         is_destination: Optional[bool] = None,
         limit: int = 100,
@@ -686,9 +751,10 @@ class ConnectionService:
 
         # Last 7 days runs count (any status, just for total activity)
         # Using a distinct count of job IDs to avoid overcounting if a job has multiple related pipeline nodes
-        last_7d_runs_count = self.db_session.query(func.count(distinct(Job.id))). \
-            select_from(base_job_query.subquery()). \
-            filter(Job.completed_at >= last_7d).scalar()
+        # Fix Cartesian product warning by explicitly selecting Job columns in subquery
+        subq = base_job_query.with_entities(Job.id, Job.completed_at).subquery()
+        last_7d_runs_count = self.db_session.query(func.count(distinct(subq.c.id))). \
+            filter(subq.c.completed_at >= last_7d).scalar()
 
 
         # Data Extracted (GB) - Currently not explicitly tracked per connection/job in this system

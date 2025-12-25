@@ -42,6 +42,20 @@ class ConnectorType(str, enum.Enum):
     CUSTOM_SCRIPT = "custom_script"
     SINGER_TAP = "singer_tap"
 
+class AssetType(str, enum.Enum):
+    TABLE = "table"
+    VIEW = "view"
+    COLLECTION = "collection"
+    FILE = "file"
+    KEY_PATTERN = "key_pattern"
+    API_ENDPOINT = "endpoint"
+    STREAM = "stream"
+    SQL_QUERY = "sql_query"
+    NOSQL_QUERY = "nosql_query"
+    PYTHON_SCRIPT = "python"
+    SHELL_SCRIPT = "shell"
+    JAVASCRIPT_SCRIPT = "javascript"
+
 class PipelineStatus(str, enum.Enum):
     DRAFT = "draft"
     ACTIVE = "active"

@@ -8,11 +8,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
 from app.models.base import Base, AuditMixin, SoftDeleteMixin, OwnerMixin
-from app.models.enums import ConnectorType
+from app.models.enums import ConnectorType, AssetType
 
 if TYPE_CHECKING:
     from app.models.pipelines import Pipeline  # Avoid circular import
     from app.models.execution import Watermark
+    from app.models.environment import Environment
 
 class Connection(Base, AuditMixin, SoftDeleteMixin, OwnerMixin):
     __tablename__ = "connections"
@@ -40,6 +41,10 @@ class Connection(Base, AuditMixin, SoftDeleteMixin, OwnerMixin):
     assets: Mapped[list["Asset"]] = relationship(
         back_populates="connection", cascade="all, delete-orphan", lazy="selectin"
     )
+    
+    environments: Mapped[list["Environment"]] = relationship(
+        back_populates="connection", cascade="all, delete-orphan", lazy="selectin"
+    )
 
     def __repr__(self):
         return f"<Connection(id={self.id}, name='{self.name}', type={self.connector_type})>"
@@ -54,7 +59,10 @@ class Asset(Base, AuditMixin, SoftDeleteMixin):
     )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    asset_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    asset_type: Mapped[AssetType] = mapped_column(
+        SQLEnum(AssetType, values_callable=lambda obj: [e.value for e in obj]), 
+        nullable=False
+    )
     fully_qualified_name: Mapped[Optional[str]] = mapped_column(String(500))
 
     is_source: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

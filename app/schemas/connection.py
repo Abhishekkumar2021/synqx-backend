@@ -1,7 +1,7 @@
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator, ConfigDict, model_validator
-from app.models.enums import ConnectorType
+from app.models.enums import ConnectorType, AssetType
 
 
 class ConnectionBase(BaseModel):
@@ -112,7 +112,7 @@ class AssetSchemaVersionRead(AssetSchemaVersionBase):
 
 class AssetBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
-    asset_type: str = Field(..., max_length=50)
+    asset_type: AssetType
     fully_qualified_name: Optional[str] = Field(None, max_length=500)
     is_source: bool = True
     is_destination: bool = False
@@ -145,7 +145,7 @@ class AssetCreate(AssetBase):
 
 class AssetUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
-    asset_type: Optional[str] = Field(None, max_length=50)
+    asset_type: Optional[AssetType] = None
     fully_qualified_name: Optional[str] = Field(None, max_length=500)
     is_source: Optional[bool] = None
     is_destination: Optional[bool] = None
@@ -257,4 +257,11 @@ class ConnectionEnvironmentInfo(BaseModel):
     base_path: Optional[str] = None
     available_tools: Dict[str, str] = Field(default_factory=dict)
     installed_packages: Dict[str, str] = Field(default_factory=dict)
+    node_version: Optional[str] = None
+    npm_packages: Dict[str, str] = Field(default_factory=dict)
+    initialized_languages: List[str] = Field(default_factory=list)
+    ruby_version: Optional[str] = None
+    powershell_version: Optional[str] = None
+    perl_version: Optional[str] = None
+    gcc_version: Optional[str] = None
     details: Dict[str, Any] = Field(default_factory=dict)

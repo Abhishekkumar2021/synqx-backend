@@ -33,7 +33,7 @@ from app.services.connection_service import ConnectionService
 from app.services.vault_service import VaultService
 from app.core.errors import AppError
 from app.core.logging import get_logger
-from app.models.enums import ConnectorType
+from app.models.enums import ConnectorType, AssetType
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -332,7 +332,7 @@ def discover_assets(
 )
 def list_connection_assets(
     connection_id: int,
-    asset_type: Optional[str] = Query(None, description="Filter by asset type"),
+    asset_type: Optional[AssetType] = Query(None, description="Filter by asset type"),
     is_source: Optional[bool] = Query(None, description="Filter source assets"),
     is_destination: Optional[bool] = Query(
         None, description="Filter destination assets"
@@ -848,3 +848,62 @@ def get_connection_environment(
                 "message": "Failed to fetch environment information",
             },
         )
+
+# --- Dependency Management ---
+
+from app.services.dependency_service import DependencyService
+
+@router.post("/{connection_id}/environment/initialize", summary="Initialize environment")
+def initialize_environment(
+    connection_id: int,
+    language: str = Body(..., embed=True),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        service = DependencyService(db, connection_id)
+        env = service.initialize_environment(language)
+        return {"id": env.id, "status": env.status, "version": env.version}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.get("/{connection_id}/dependencies/{language}", summary="List installed packages")
+def list_dependencies(
+    connection_id: int,
+    language: str,
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        service = DependencyService(db, connection_id)
+        return service.list_packages(language)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{connection_id}/dependencies/{language}/install", summary="Install package")
+def install_dependency(
+    connection_id: int,
+    language: str,
+    package: str = Body(..., embed=True),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        service = DependencyService(db, connection_id)
+        return {"output": service.install_package(language, package)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{connection_id}/dependencies/{language}/uninstall", summary="Uninstall package")
+def uninstall_dependency(
+    connection_id: int,
+    language: str,
+    package: str = Body(..., embed=True),
+    db: Session = Depends(deps.get_db),
+    current_user: models.User = Depends(deps.get_current_user),
+):
+    try:
+        service = DependencyService(db, connection_id)
+        return {"output": service.uninstall_package(language, package)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))

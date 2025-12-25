@@ -24,6 +24,7 @@ from app.models.enums import (
 )
 
 from app.models.connections import Connection, Asset, AssetSchemaVersion
+from app.models.environment import Environment
 from app.models.pipelines import Pipeline, PipelineVersion, PipelineNode, PipelineEdge
 from app.models.execution import Job, PipelineRun, StepRun, PipelineRunContext, Watermark
 from app.models.monitoring import SchedulerEvent, JobLog, StepLog, AlertConfig, Alert
@@ -57,6 +58,7 @@ __all__ = [
     # Models
     "User",
     "Connection",
+    "Environment",
     "Asset",
     "AssetSchemaVersion",
     "Pipeline",

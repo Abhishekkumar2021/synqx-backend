@@ -61,6 +61,16 @@ def execute_connection_query(
     
     try:
         config = VaultService.get_connector_config(connection)
+        
+        # Inject Execution Context for Custom Script
+        if connection.connector_type.value == "custom_script":
+            from app.services.dependency_service import DependencyService
+            dep_service = DependencyService(db, connection.id)
+            exec_ctx = {}
+            exec_ctx.update(dep_service.get_execution_context("python"))
+            exec_ctx.update(dep_service.get_execution_context("node"))
+            config["execution_context"] = exec_ctx
+
         connector = ConnectorFactory.get_connector(
             connector_type=connection.connector_type.value,
             config=config
@@ -160,6 +170,16 @@ def get_connection_schema_metadata(
     
     try:
         config = VaultService.get_connector_config(connection)
+        
+        # Inject Execution Context for Custom Script
+        if connection.connector_type.value == "custom_script":
+            from app.services.dependency_service import DependencyService
+            dep_service = DependencyService(db, connection.id)
+            exec_ctx = {}
+            exec_ctx.update(dep_service.get_execution_context("python"))
+            exec_ctx.update(dep_service.get_execution_context("node"))
+            config["execution_context"] = exec_ctx
+
         connector = ConnectorFactory.get_connector(
             connector_type=connection.connector_type.value,
             config=config

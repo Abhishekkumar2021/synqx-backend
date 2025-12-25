@@ -35,6 +35,7 @@ class CustomScriptConnector(BaseConnector):
         self.base_path = config.get("base_path", "/tmp")
         self.env_vars = config.get("env_vars", {})
         self.timeout = config.get("timeout", 300) # Default 5 mins
+        self.execution_context = config.get("execution_context", {}) # New: For isolated envs
         super().__init__(config)
 
     def validate_config(self) -> None:
@@ -93,14 +94,16 @@ class CustomScriptConnector(BaseConnector):
             "numpy_version": np.__version__,
             "base_path": self.base_path,
             "available_tools": {},
-            "installed_packages": installed_packages
+            "installed_packages": installed_packages,
+            "node_version": None,
+            "npm_packages": {}
         }
         
         # Check standard data tools if they exist
         common_tools = [
             "jq", "curl", "wget", "aws", "gcloud", "psql", "mysql", 
             "git", "docker", "kubectl", "grep", "sed", "awk", "tar", 
-            "zip", "unzip", "node", "npm", "java", "go", "python3", "pip"
+            "zip", "unzip", "node", "npm", "java", "go", "python3", "pip", "make"
         ]
         if self.config.get("required_tools"):
             common_tools.extend(self.config["required_tools"])
@@ -109,6 +112,32 @@ class CustomScriptConnector(BaseConnector):
             path = shutil.which(tool)
             if path:
                 info["available_tools"][tool] = path
+
+        # Node.js specific info
+        if "node" in info["available_tools"]:
+            try:
+                node_ver = subprocess.check_output(["node", "-v"], text=True).strip()
+                info["node_version"] = node_ver
+                
+                # Check execution context for isolated npm packages
+                cwd = self.execution_context.get("node_cwd")
+                if cwd and os.path.exists(os.path.join(cwd, "package.json")):
+                     try:
+                        npm_list = subprocess.check_output(["npm", "list", "--depth=0", "--json"], cwd=cwd, text=True)
+                        npm_data = json.loads(npm_list)
+                        if "dependencies" in npm_data:
+                            info["npm_packages"] = {k: v.get("version", "unknown") for k, v in npm_data["dependencies"].items()}
+                     except: pass
+                elif "npm" in info["available_tools"]:
+                    try:
+                        npm_list = subprocess.check_output(["npm", "list", "-g", "--depth=0", "--json"], text=True)
+                        npm_data = json.loads(npm_list)
+                        if "dependencies" in npm_data:
+                            info["npm_packages"] = {k: v.get("version", "unknown") for k, v in npm_data["dependencies"].items()}
+                    except Exception:
+                        pass
+            except Exception:
+                pass
                 
         return info
 
@@ -122,15 +151,29 @@ class CustomScriptConnector(BaseConnector):
             logger.info(f"Custom Script Environment: Python {env_info['python_version']}, Pandas {env_info['pandas_version']}")
 
             # 1. Basic Python Environment Check
-            local_scope = {"pd": pd, "np": np}
-            exec("import pandas as pd; import numpy as np", local_scope)
+            if "python_executable" in self.execution_context:
+                # Test isolated python
+                subprocess.check_call([self.execution_context["python_executable"], "-c", "print('ok')"])
+            else:
+                # Test local execution
+                local_scope = {"pd": pd, "np": np}
+                exec("import pandas as pd; import numpy as np", local_scope)
 
             # 2. Check dependencies if code is provided in config
-            if self.config.get("code") and self.config.get("language") == "python":
-                missing = self._check_python_dependencies(self.config["code"])
-                if missing:
-                    logger.error(f"Missing Python dependencies: {', '.join(missing)}")
-                    return False
+            if self.config.get("code"):
+                lang = self.config.get("language")
+                if lang == "python":
+                    # If isolated, we can't easily check imports statically against that environment without running code.
+                    # Skipping deep check for isolated mode in test_connection for simplicity
+                    if "python_executable" not in self.execution_context:
+                        missing = self._check_python_dependencies(self.config["code"])
+                        if missing:
+                            logger.error(f"Missing Python dependencies: {', '.join(missing)}")
+                            return False
+                elif lang == "javascript":
+                    if not env_info.get("node_version"):
+                        logger.error("Node.js runtime not found for JavaScript execution.")
+                        return False
 
             # 3. Check for shell tools if specified
             if self.config.get("required_tools"):
@@ -156,13 +199,19 @@ class CustomScriptConnector(BaseConnector):
             return []
             
         for entry in os.scandir(self.base_path):
-            if entry.is_file() and (entry.name.endswith(".py") or entry.name.endswith(".sh")):
+            valid_exts = [".py", ".sh", ".js"]
+            if entry.is_file() and any(entry.name.endswith(ext) for ext in valid_exts):
                 if pattern and pattern not in entry.name:
                     continue
-                    
+                
+                type_map = {
+                    ".py": "python", ".sh": "shell", ".js": "javascript"
+                }
+                _, ext = os.path.splitext(entry.name)
+                
                 asset_info = {
                     "name": entry.name,
-                    "type": "python" if entry.name.endswith(".py") else "shell",
+                    "type": type_map.get(ext, "unknown"),
                     "path": entry.path
                 }
                 
@@ -200,12 +249,12 @@ class CustomScriptConnector(BaseConnector):
         if not code:
             possible_path = os.path.join(self.base_path, asset)
             if os.path.exists(possible_path):
-                if possible_path.endswith(".py"):
-                    language = "python"
-                    with open(possible_path, "r") as f: code = f.read()
-                elif possible_path.endswith(".sh"):
-                    language = "shell"
-                    code = possible_path
+                if possible_path.endswith(".py"): language = "python"
+                elif possible_path.endswith(".sh"): language = "shell"
+                elif possible_path.endswith(".js"): language = "javascript"
+                
+                if language in ["python", "shell", "javascript"]:
+                     code = possible_path
             else:
                 raise DataTransferError(f"No code provided for asset '{asset}' and file not found.")
 
@@ -220,6 +269,8 @@ class CustomScriptConnector(BaseConnector):
             yield from self._execute_python(asset, code, limit, offset, incremental_filter=incremental_filter, **exec_kwargs)
         elif language == "shell":
             yield from self._execute_shell(asset, code, limit, offset, incremental_filter=incremental_filter, **exec_kwargs)
+        elif language == "javascript":
+            yield from self._execute_javascript(asset, code, limit, offset, incremental_filter=incremental_filter, **exec_kwargs)
         else:
             raise ConfigurationError(f"Unsupported script language: {language}")
 
@@ -227,6 +278,11 @@ class CustomScriptConnector(BaseConnector):
         """
         Executes Python code in-process. 
         """
+        # If isolated environment is configured
+        if "python_executable" in self.execution_context:
+            python_exe = self.execution_context["python_executable"]
+            return self._execute_external_process([python_exe], asset_name, code, limit, offset, incremental_filter, ".py")
+
         # Pre-check dependencies
         missing_deps = self._check_python_dependencies(code)
         if missing_deps:
@@ -317,6 +373,7 @@ class CustomScriptConnector(BaseConnector):
                         series = df[col]
                         try:
                             if pd.api.types.is_numeric_dtype(series):
+                                # Robust numeric conversion
                                 if isinstance(val, str):
                                     threshold = float(val.strip().replace(',', ''))
                                 else:
@@ -367,17 +424,7 @@ class CustomScriptConnector(BaseConnector):
             
             batch = []
             chunk_size = 5000
-            start_time = time.time()
-            
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                
-                if time.time() - start_time > self.timeout:
-                    process.kill()
-                    raise DataTransferError(f"Shell script timed out after {self.timeout}s")
-
+            for line in process.stdout:
                 if not line.strip(): continue
                 try:
                     batch.append(json.loads(line))
@@ -389,6 +436,7 @@ class CustomScriptConnector(BaseConnector):
             
             if batch: yield pd.DataFrame(batch)
             
+            process.wait()
             if process.returncode != 0:
                 stderr = process.stderr.read()
                 msg = f"Shell script failed (Exit {process.returncode}): {stderr}"
@@ -400,6 +448,94 @@ class CustomScriptConnector(BaseConnector):
             raise DataTransferError(f"Shell execution error: {e}")
         finally:
             if not is_file and os.path.exists(script_path):
+                os.remove(script_path)
+
+    def _execute_javascript(self, asset_name: str, code: str, limit: int, offset: int, incremental_filter: Optional[Dict] = None, **kwargs) -> Iterator[pd.DataFrame]:
+        """
+        Executes a Node.js script. 
+        Expects the script to output JSON array or JSON lines to stdout.
+        """
+        if not shutil.which("node"):
+            raise ConfigurationError("Node.js runtime not found. Please install node.")
+        
+        cmd = ["node"]
+        return self._execute_external_process(cmd, asset_name, code, limit, offset, incremental_filter, ".js", cwd=self.execution_context.get("node_cwd"))
+
+    def _execute_external_process(self, base_cmd: List[str], asset_name: str, code: str, limit: int, offset: int, incremental_filter: Optional[Dict], file_ext: str, cwd: Optional[str] = None, is_binary: bool = False) -> Iterator[pd.DataFrame]:
+        """
+        Generic helper for running external scripts.
+        """
+        is_file = os.path.exists(code) and os.path.isfile(code)
+        
+        # Prepare Env
+        cmd_env = os.environ.copy()
+        cmd_env.update(self.env_vars)
+        if limit: cmd_env['LIMIT'] = str(limit)
+        if offset: cmd_env['OFFSET'] = str(offset)
+        if incremental_filter: cmd_env['INCREMENTAL_FILTER'] = json.dumps(incremental_filter)
+        
+        script_path = None
+        if is_binary:
+            full_cmd = base_cmd # base_cmd already has the binary path
+        else:
+            is_file = os.path.exists(code) and os.path.isfile(code)
+            if is_file:
+                script_path = code
+            else:
+                with tempfile.NamedTemporaryFile(mode='w', suffix=file_ext, delete=False) as tf:
+                    tf.write(code)
+                    script_path = tf.name
+            full_cmd = base_cmd + [script_path]
+
+        try:
+            process = subprocess.Popen(
+                full_cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                env=cmd_env, 
+                text=True,
+                cwd=cwd
+            )
+            
+            batch = []
+            chunk_size = 5000
+            start_time = time.time()
+            
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                
+                if time.time() - start_time > self.timeout:
+                    process.kill()
+                    raise DataTransferError(f"Script timed out after {self.timeout}s")
+
+                if not line.strip(): continue
+                try:
+                    data = json.loads(line)
+                    if isinstance(data, list):
+                        batch.extend(data)
+                    else:
+                        batch.append(data)
+                except json.JSONDecodeError: 
+                    if line.strip():
+                        logger.info(f"Script stdout: {line.strip()}")
+                
+                if len(batch) >= chunk_size:
+                    yield pd.DataFrame(batch)
+                    batch = []
+            
+            if batch: yield pd.DataFrame(batch)
+            
+            process.wait()
+            if process.returncode != 0:
+                stderr = process.stderr.read()
+                raise DataTransferError(f"Script failed (Exit {process.returncode}): {stderr}")
+        except Exception as e:
+            if isinstance(e, DataTransferError): raise
+            raise DataTransferError(f"Execution error: {e}")
+        finally:
+            if not is_binary and script_path and not (os.path.exists(code) and os.path.isfile(code)) and os.path.exists(script_path):
                 os.remove(script_path)
 
     def execute_query(
