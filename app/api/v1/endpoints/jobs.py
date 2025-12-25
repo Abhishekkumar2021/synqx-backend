@@ -409,7 +409,7 @@ def get_step_data(
 def clear_forensic_cache():
     try:
         from app.engine.runner_core.forensics import ForensicSniffer
-        ForensicSniffer.clear_all()
+        ForensicSniffer.cleanup_all()
         return {"status": "success", "message": "Forensic cache cleared"}
     except Exception as e:
         logger.error(f"Error clearing forensic cache: {e}")

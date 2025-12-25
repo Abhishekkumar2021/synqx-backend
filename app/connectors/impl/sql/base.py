@@ -1,6 +1,7 @@
 from abc import abstractmethod
 from typing import Any, Dict, List, Optional, Iterator, Union
 import pandas as pd
+import numpy as np
 import json
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.engine import Engine, Connection
@@ -219,6 +220,7 @@ class SQLConnector(BaseConnector):
             if offset: query += f" OFFSET {offset}"
         
         chunksize = kwargs.pop("chunksize", 10000)
+        params = kwargs.pop("params", None)
         try:
             # Use bind parameters for safety and type handling
             for chunk in pd.read_sql_query(text(query), con=self._connection, chunksize=chunksize, params=params, **kwargs):

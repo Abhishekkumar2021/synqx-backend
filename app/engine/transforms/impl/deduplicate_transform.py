@@ -2,6 +2,9 @@ from typing import Iterator, Dict, Any, List, Optional
 import pandas as pd
 from app.engine.transforms.base import BaseTransform
 from app.core.errors import ConfigurationError
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 class DeduplicateTransform(BaseTransform):
     """

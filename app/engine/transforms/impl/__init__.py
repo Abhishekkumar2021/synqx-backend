@@ -13,6 +13,7 @@ from app.engine.transforms.impl.type_cast_transform import TypeCastTransform
 from app.engine.transforms.impl.regex_replace_transform import RegexReplaceTransform
 from app.engine.transforms.impl.code_transform import CodeTransform
 from app.engine.transforms.impl.union_transform import UnionTransform
+from app.engine.transforms.impl.noop_transform import NoOpTransform
 
 # Register all available transforms
 TransformFactory.register_transform("pandas_transform", PandasTransform)

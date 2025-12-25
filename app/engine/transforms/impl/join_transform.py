@@ -15,6 +15,9 @@ class JoinTransform(BaseTransform):
         if "on" not in self.config:
             raise ConfigurationError("JoinTransform requires 'on' column.")
 
+    def transform(self, data: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+        raise NotImplementedError("JoinTransform requires multiple inputs. Use transform_multi instead.")
+
     def transform_multi(self, data_map: Dict[str, Iterator[pd.DataFrame]]) -> Iterator[pd.DataFrame]:
         join_on = self.config["on"]
         how = self.config.get("how", "left")

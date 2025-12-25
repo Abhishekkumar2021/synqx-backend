@@ -32,7 +32,7 @@ class SchedulerEvent(Base, AuditMixin):
     )
 
     reason: Mapped[Optional[str]] = mapped_column(Text)
-    sceduler_metadata: Mapped[Optional[dict]] = mapped_column(JSON)
+    scheduler_metadata: Mapped[Optional[dict]] = mapped_column(JSON)
 
     pipeline: Mapped["Pipeline"] = relationship("Pipeline", back_populates="scheduler_events")
 

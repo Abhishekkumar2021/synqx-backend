@@ -1,33 +1,90 @@
+"""
+=================================================================================
+FILE 6: state_manager.py - Enhanced State Manager with Real-time Telemetry
+=================================================================================
+"""
+import asyncio
 from typing import Optional
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+
+from app.db.session import SessionLocal
 from app.models.execution import StepRun, PipelineRun
-from app.models.enums import OperatorRunStatus, PipelineRunStatus
+from app.models.enums import OperatorRunStatus, PipelineRunStatus, OperatorType
 from app.core.db_logging import DBLogger
 from app.core.logging import get_logger
+from app.core.websockets import manager
 
 logger = get_logger(__name__)
 
+
 class StateManager:
     """
-    Manages the state of PipelineRuns and StepRuns, including DB persistence and logging.
+    Manages pipeline and step run state with real-time telemetry broadcasting.
+    
+    Features:
+    - Thread-safe state updates
+    - Real-time WebSocket telemetry
+    - Comprehensive metrics tracking
+    - Automatic duration calculation
+    - Retry support
+    - Error tracking
     """
+    
     def __init__(self, db: Session, job_id: int):
         self.db = db
         self.job_id = job_id
-
-    def initialize_run(self, pipeline_id: int, version_id: int) -> PipelineRun:
-        from sqlalchemy import func
+    
+    def _broadcast_telemetry(self, data: dict):
+        """
+        Broadcast telemetry data via WebSocket.
+        Handles sync/async context gracefully.
+        """
+        try:
+            manager.broadcast_sync(f"job_telemetry:{self.job_id}", data)
+        except Exception as e:
+            logger.debug(f"Telemetry broadcast failed (non-critical): {e}")
+    
+    def initialize_run(
+        self,
+        pipeline_id: int,
+        version_id: int,
+        total_nodes: int = 0
+    ) -> PipelineRun:
+        """
+        Initialize or reset pipeline run for execution.
         
-        pipeline_run = self.db.query(PipelineRun).filter(PipelineRun.job_id == self.job_id).first()
+        Supports retry scenarios by resetting existing runs.
+        """
+        pipeline_run = self.db.query(PipelineRun).filter(
+            PipelineRun.job_id == self.job_id
+        ).first()
         
         if pipeline_run:
-            logger.info(f"Resuming/Retrying existing PipelineRun {pipeline_run.id} for Job {self.job_id}")
+            # Reset existing run for retry
+            logger.info(f"Resetting existing pipeline run {pipeline_run.id} for retry")
+            
             pipeline_run.status = PipelineRunStatus.RUNNING
+            pipeline_run.total_nodes = total_nodes
             pipeline_run.started_at = datetime.now(timezone.utc)
             pipeline_run.completed_at = None
             pipeline_run.error_message = None
+            
+            # Reset all step runs
+            for step in pipeline_run.step_runs:
+                step.status = OperatorRunStatus.PENDING
+                step.records_in = step.records_out = step.bytes_processed = 0
+                step.records_filtered = step.records_error = 0
+                step.duration_seconds = 0
+                step.retry_count = 0
+                step.error_message = None
+                step.error_type = None
+                step.started_at = None
+                step.completed_at = None
+        
         else:
+            # Create new run
             max_run = (
                 self.db.query(func.max(PipelineRun.run_number))
                 .filter(PipelineRun.pipeline_id == pipeline_id)
@@ -40,127 +97,325 @@ class StateManager:
                 pipeline_version_id=version_id,
                 run_number=max_run + 1,
                 status=PipelineRunStatus.RUNNING,
-                started_at=datetime.now(timezone.utc),
+                total_nodes=total_nodes,
+                started_at=datetime.now(timezone.utc)
             )
             self.db.add(pipeline_run)
+            
+            logger.info(
+                f"Created new pipeline run {max_run + 1} for pipeline {pipeline_id}"
+            )
         
-        self.db.flush()
+        self.db.commit()
         self.db.refresh(pipeline_run)
         
         DBLogger.log_job(
-            self.db,
-            self.job_id,
-            "INFO",
-            f"PipelineRun {pipeline_run.run_number} started.",
-            metadata={"pipeline_run_id": pipeline_run.id},
-            source="runner",
+            self.db, self.job_id, "INFO",
+            f"Pipeline run initialized: run_number={pipeline_run.run_number}, "
+            f"nodes={total_nodes}"
         )
+        
+        # Broadcast initial state
+        self._broadcast_telemetry({
+            "type": "run_started",
+            "run_id": pipeline_run.id,
+            "run_number": pipeline_run.run_number,
+            "pipeline_id": pipeline_id,
+            "total_nodes": total_nodes,
+            "started_at": pipeline_run.started_at.isoformat()
+        })
+        
         return pipeline_run
-
-    def create_step_run(self, pipeline_run_id: int, node_id: int, operator_type: str, order_index: int) -> StepRun:
+    
+    def create_step_run(
+        self,
+        pipeline_run_id: int,
+        node_id: int,
+        operator_type: str,
+        order_index: int
+    ) -> StepRun:
+        """Create a new step run for a node"""
         step_run = StepRun(
             pipeline_run_id=pipeline_run_id,
             node_id=node_id,
             operator_type=operator_type,
             order_index=order_index,
-            status=OperatorRunStatus.RUNNING,
+            status=OperatorRunStatus.PENDING,
             started_at=datetime.now(timezone.utc),
+            records_in=0,
+            records_out=0,
+            records_filtered=0,
+            records_error=0,
+            bytes_processed=0,
+            retry_count=0
         )
+        
         self.db.add(step_run)
-        self.db.flush()
+        self.db.commit()
+        self.db.refresh(step_run)
+        
+        logger.debug(f"Created step run {step_run.id} for node {node_id}")
+        
         return step_run
-
-    def update_step_status(self, step_run: StepRun, status: OperatorRunStatus, records_in: int = 0, records_out: int = 0, bytes_processed: int = 0, error: Optional[Exception] = None):
-        try:
-            step_run.status = status
-            step_run.completed_at = datetime.now(timezone.utc)
-            if step_run.started_at:
-                step_run.duration_seconds = (step_run.completed_at - step_run.started_at).total_seconds()
+    
+    def update_step_status(
+        self,
+        step_run: StepRun,
+        status: OperatorRunStatus,
+        records_in: int = 0,
+        records_out: int = 0,
+        records_filtered: int = 0,
+        records_error: int = 0,
+        bytes_processed: int = 0,
+        retry_count: int = 0,
+        cpu_percent: Optional[float] = None,
+        memory_mb: Optional[float] = None,
+        sample_data: Optional[dict] = None,
+        error: Optional[Exception] = None
+    ):
+        """
+        Update step run status with comprehensive metrics.
+        Uses separate session to avoid locking issues in parallel execution.
+        """
+        with SessionLocal() as db:
+            try:
+                t_step_run = db.query(StepRun).filter(
+                    StepRun.id == step_run.id
+                ).first()
+                
+                if not t_step_run:
+                    logger.warning(f"Step run {step_run.id} not found for update")
+                    return
+                
+                # Update status
+                t_step_run.status = status
+                
+                # Update timing
+                if status == OperatorRunStatus.RUNNING and not t_step_run.started_at:
+                    t_step_run.started_at = datetime.now(timezone.utc)
+                
+                if status in [OperatorRunStatus.SUCCESS, OperatorRunStatus.FAILED]:
+                    t_step_run.completed_at = datetime.now(timezone.utc)
+                    if t_step_run.started_at:
+                        duration = (
+                            t_step_run.completed_at - t_step_run.started_at
+                        ).total_seconds()
+                        t_step_run.duration_seconds = duration
+                
+                # Update metrics
+                t_step_run.records_in = records_in
+                t_step_run.records_out = records_out
+                t_step_run.records_filtered = records_filtered
+                t_step_run.records_error = records_error
+                t_step_run.bytes_processed = bytes_processed
+                t_step_run.retry_count = retry_count
+                
+                # Update resource usage
+                if cpu_percent is not None:
+                    t_step_run.cpu_percent = cpu_percent
+                if memory_mb is not None:
+                    t_step_run.memory_mb = memory_mb
+                
+                # Update sample data
+                if sample_data is not None:
+                    t_step_run.sample_data = sample_data
+                
+                # Update error info
+                if error:
+                    t_step_run.error_message = str(error)
+                    t_step_run.error_type = type(error).__name__
+                
+                db.add(t_step_run)
+                db.commit()
+                
+                # Compute pipeline-level aggregates
+                t_pipeline_run = db.query(PipelineRun).filter(
+                    PipelineRun.id == t_step_run.pipeline_run_id
+                ).first()
+                
+                if t_pipeline_run:
+                    # Aggregate extraction metrics
+                    total_extracted = sum(
+                        s.records_in
+                        for s in t_pipeline_run.step_runs
+                        if s.operator_type == OperatorType.EXTRACT
+                    )
+                    
+                    # Aggregate load metrics
+                    total_loaded = sum(
+                        s.records_out
+                        for s in t_pipeline_run.step_runs
+                        if s.operator_type == OperatorType.LOAD
+                    )
+                    
+                    # Count completed steps
+                    completed_steps = len([
+                        s for s in t_pipeline_run.step_runs
+                        if s.status == OperatorRunStatus.SUCCESS
+                    ])
+                    
+                    # Count failed steps
+                    failed_steps = len([
+                        s for s in t_pipeline_run.step_runs
+                        if s.status == OperatorRunStatus.FAILED
+                    ])
+                    
+                    # Broadcast telemetry
+                    self._broadcast_telemetry({
+                        "type": "step_update",
+                        "step_run_id": t_step_run.id,
+                        "node_id": t_step_run.node_id,
+                        "status": status.value,
+                        "records_in": records_in,
+                        "records_out": records_out,
+                        "records_filtered": records_filtered,
+                        "records_error": records_error,
+                        "bytes_processed": bytes_processed,
+                        "cpu_percent": cpu_percent,
+                        "memory_mb": memory_mb,
+                        "completed_at": (
+                            t_step_run.completed_at.isoformat()
+                            if t_step_run.completed_at else None
+                        ),
+                        "duration_seconds": t_step_run.duration_seconds,
+                        # Pipeline aggregates
+                        "total_extracted": total_extracted,
+                        "total_loaded": total_loaded,
+                        "total_nodes": t_pipeline_run.total_nodes,
+                        "completed_steps": completed_steps,
+                        "failed_steps": failed_steps,
+                        "progress_pct": (
+                            (completed_steps / t_pipeline_run.total_nodes * 100)
+                            if t_pipeline_run.total_nodes > 0 else 0
+                        )
+                    })
             
-            step_run.records_in = records_in
-            step_run.records_out = records_out
-            step_run.bytes_processed = bytes_processed
-            
-            node_name = step_run.node.name if step_run.node else "Unknown Node"
-
-            if error:
-                step_run.error_message = str(error)
-                step_run.error_type = type(error).__name__
-                DBLogger.log_step(
-                    self.db,
-                    step_run.id,
-                    "ERROR",
-                    f"Node '{node_name}' failed: {error}",
-                )
-            else:
-                DBLogger.log_step(
-                    self.db,
-                    step_run.id,
-                    "SUCCESS",
-                    f"Node '{node_name}' completed in {step_run.duration_seconds:.2f}s. Read: {records_in}, Written: {records_out}, Size: {bytes_processed} bytes.",
-                )
-            
-            self.db.add(step_run)
-            self.db.commit() # Commit immediately to persist status
-        except Exception as e:
-            logger.error(f"Failed to update step status: {e}")
-            self.db.rollback()
-
+            except Exception as e:
+                logger.error(f"Failed to update step status: {e}", exc_info=True)
+                db.rollback()
+    
     def fail_run(self, pipeline_run: PipelineRun, error: Exception):
-        from app.models.enums import OperatorType
-        
-        # Reload to ensure we have the latest step runs
-        self.db.refresh(pipeline_run)
-        
-        pipeline_run.status = PipelineRunStatus.FAILED
-        pipeline_run.completed_at = datetime.now(timezone.utc)
-        if pipeline_run.started_at:
-            pipeline_run.duration_seconds = (pipeline_run.completed_at - pipeline_run.started_at).total_seconds()
-        
-        pipeline_run.error_message = str(error)
-        
-        # Aggregate stats even on failure to show partial progress
-        pipeline_run.total_extracted = sum(step.records_in for step in pipeline_run.step_runs if step.operator_type == OperatorType.EXTRACT)
-        pipeline_run.total_loaded = sum(step.records_out for step in pipeline_run.step_runs if step.operator_type == OperatorType.LOAD)
-        pipeline_run.bytes_processed = sum(step.bytes_processed for step in pipeline_run.step_runs)
-
-        self.db.add(pipeline_run)
-        self.db.commit()
-
-        DBLogger.log_job(
-            self.db,
-            self.job_id,
-            "ERROR",
-            f"PipelineRun {pipeline_run.run_number} failed: {error}",
-            metadata={"pipeline_run_id": pipeline_run.id},
-            source="runner",
-        )
-
-    def complete_run(self, pipeline_run: PipelineRun):
-        from app.models.enums import OperatorType
-        
-        # Reload to ensure we have the latest step runs
-        self.db.refresh(pipeline_run)
-        
-        pipeline_run.status = PipelineRunStatus.COMPLETED
-        pipeline_run.completed_at = datetime.now(timezone.utc)
-        
-        # Aggregate stats
-        pipeline_run.total_extracted = sum(step.records_in for step in pipeline_run.step_runs if step.operator_type == OperatorType.EXTRACT)
-        pipeline_run.total_loaded = sum(step.records_out for step in pipeline_run.step_runs if step.operator_type == OperatorType.LOAD)
-        pipeline_run.bytes_processed = sum(step.bytes_processed for step in pipeline_run.step_runs)
-        
-        if pipeline_run.started_at:
-            pipeline_run.duration_seconds = (pipeline_run.completed_at - pipeline_run.started_at).total_seconds()
+        """Mark pipeline run as failed with error details"""
+        with SessionLocal() as db:
+            t_run = db.query(PipelineRun).filter(
+                PipelineRun.id == pipeline_run.id
+            ).first()
             
-        self.db.add(pipeline_run)
-        self.db.commit()
-
-        DBLogger.log_job(
-            self.db,
-            self.job_id,
-            "INFO",
-            f"PipelineRun {pipeline_run.run_number} succeeded.",
-            metadata={"pipeline_run_id": pipeline_run.id},
-            source="runner",
-        )
+            if not t_run:
+                logger.warning(f"Pipeline run {pipeline_run.id} not found for failure")
+                return
+            
+            t_run.status = PipelineRunStatus.FAILED
+            t_run.error_message = str(error)
+            t_run.completed_at = datetime.now(timezone.utc)
+            
+            if t_run.started_at:
+                duration = (t_run.completed_at - t_run.started_at).total_seconds()
+                logger.error(
+                    f"Pipeline run {t_run.id} failed after {duration:.2f}s: {error}"
+                )
+            
+            db.add(t_run)
+            db.commit()
+            
+            DBLogger.log_job(
+                self.db, self.job_id, "ERROR",
+                f"Pipeline run {t_run.run_number} failed: {str(error)}"
+            )
+            
+            # Broadcast failure
+            self._broadcast_telemetry({
+                "type": "run_failed",
+                "run_id": t_run.id,
+                "status": "failed",
+                "error_message": str(error),
+                "completed_at": t_run.completed_at.isoformat()
+            })
+            
+            # Notify job list
+            manager.broadcast_sync("jobs_list", {"type": "job_list_update"})
+    
+    def complete_run(self, pipeline_run: PipelineRun):
+        """Mark pipeline run as completed successfully"""
+        with SessionLocal() as db:
+            t_run = db.query(PipelineRun).filter(
+                PipelineRun.id == pipeline_run.id
+            ).first()
+            
+            if not t_run:
+                logger.warning(f"Pipeline run {pipeline_run.id} not found for completion")
+                return
+            
+            t_run.status = PipelineRunStatus.COMPLETED
+            t_run.completed_at = datetime.now(timezone.utc)
+            
+            if t_run.started_at:
+                duration = (t_run.completed_at - t_run.started_at).total_seconds()
+                
+                # Calculate aggregate metrics
+                total_records = sum(
+                    s.records_out for s in t_run.step_runs
+                    if s.operator_type == OperatorType.LOAD
+                )
+                
+                throughput = total_records / duration if duration > 0 else 0
+                
+                logger.info(
+                    f"Pipeline run {t_run.id} completed in {duration:.2f}s, "
+                    f"{total_records:,} records, {throughput:.2f} rec/s"
+                )
+            
+            db.add(t_run)
+            db.commit()
+            
+            DBLogger.log_job(
+                self.db, self.job_id, "SUCCESS",
+                f"Pipeline run {t_run.run_number} completed successfully"
+            )
+            
+            # Broadcast success
+            self._broadcast_telemetry({
+                "type": "run_completed",
+                "run_id": t_run.id,
+                "status": "completed",
+                "completed_at": t_run.completed_at.isoformat(),
+                "duration_seconds": (
+                    (t_run.completed_at - t_run.started_at).total_seconds()
+                    if t_run.started_at else 0
+                )
+            })
+            
+            # Notify job list
+            manager.broadcast_sync("jobs_list", {"type": "job_list_update"})
+    
+    def retry_step(self, step_run: StepRun):
+        """
+        Mark a step for retry.
+        Increments retry count and resets status.
+        """
+        with SessionLocal() as db:
+            t_step = db.query(StepRun).filter(
+                StepRun.id == step_run.id
+            ).first()
+            
+            if not t_step:
+                return
+            
+            t_step.retry_count += 1
+            t_step.status = OperatorRunStatus.PENDING
+            t_step.error_message = None
+            t_step.error_type = None
+            t_step.started_at = None
+            t_step.completed_at = None
+            
+            db.add(t_step)
+            db.commit()
+            
+            logger.info(
+                f"Step {step_run.id} marked for retry (attempt {t_step.retry_count})"
+            )
+            
+            DBLogger.log_step(
+                self.db, step_run.id, "INFO",
+                f"Retry attempt {t_step.retry_count}"
+            )

@@ -1,270 +1,567 @@
-from typing import Optional, Dict, Iterator, Callable
+"""
+=================================================================================
+FILE 5: node_executor.py - Enhanced Production Node Executor
+=================================================================================
+"""
+from typing import Optional, Dict, List, Tuple, Any
 import pandas as pd
+import numpy as np
+import os
+import psutil
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models.pipelines import PipelineNode
-from app.models.execution import PipelineRun
+from app.models.execution import PipelineRun, StepRun, Watermark
+from app.models.connections import Asset, Connection
 from app.models.enums import OperatorType, OperatorRunStatus
 from app.core.logging import get_logger
 from app.core.db_logging import DBLogger
 from app.services.vault_service import VaultService
 from app.connectors.factory import ConnectorFactory
 from app.engine.transforms.factory import TransformFactory
-from app.models.execution import Watermark
-from app.models.connections import Asset, Connection
-from app.core.errors import AppError
+from app.core.errors import AppError, ConfigurationError
 from app.engine.runner_core.state_manager import StateManager
+from app.engine.runner_core.forensics import ForensicSniffer
 
 logger = get_logger(__name__)
 
+
 class NodeExecutor:
+    """
+    Production-grade Node Executor with enhanced logging and telemetry.
+    
+    Features:
+    - Comprehensive error handling and recovery
+    - Real-time metrics tracking
+    - Forensic data capture
+    - Watermark-based incremental processing
+    - Resource monitoring (CPU, memory)
+    - Detailed execution logging
+    """
+    
     def __init__(self, state_manager: StateManager):
         self.state_manager = state_manager
-
-    def _fetch_asset_connection(self, db: Session, asset_id: int):
+    
+    def _get_process_metrics(self) -> Tuple[float, float]:
+        """Get current process CPU and memory usage"""
+        try:
+            process = psutil.Process(os.getpid())
+            cpu = process.cpu_percent(interval=0.1)
+            mem = process.memory_info().rss / (1024 * 1024)  # MB
+            return float(cpu), float(mem)
+        except Exception as e:
+            logger.debug(f"Failed to get process metrics: {e}")
+            return 0.0, 0.0
+    
+    def _fetch_asset_connection(self, db: Session, asset_id: int) -> Tuple[Asset, Connection]:
+        """Fetch asset and its connection with validation"""
         asset = db.query(Asset).filter(Asset.id == asset_id).first()
         if not asset:
-            raise AppError(f"Asset {asset_id} not found.")
+            raise AppError(f"Asset {asset_id} not found")
+        
         conn = db.query(Connection).filter(Connection.id == asset.connection_id).first()
         if not conn:
-            raise AppError(f"Connection {asset.connection_id} not found.")
+            raise AppError(f"Connection {asset.connection_id} for asset {asset_id} not found")
+        
         return asset, conn
-
-    def _materialize_iterator(self, data_iter: Iterator[pd.DataFrame]) -> list:
-        return list(data_iter)
-
+    
+    def _sniff_data(self, df: pd.DataFrame, max_rows: int = 10) -> Optional[Dict]:
+        """Capture sample data for inspection"""
+        try:
+            if df.empty:
+                return None
+            
+            sample = df.head(max_rows).replace({np.nan: None}).to_dict(orient="records")
+            return {
+                "rows": sample,
+                "columns": list(df.columns),
+                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                "shape": df.shape,
+                "total_rows": len(df)
+            }
+        except Exception as e:
+            logger.error(f"Failed to sniff data: {e}")
+            return None
+    
     def execute(
         self,
         pipeline_run: PipelineRun,
         node: PipelineNode,
-        input_data: Optional[Dict[str, Callable[[], Iterator[pd.DataFrame]]]] = None
-    ) -> Optional[Callable[[], Iterator[pd.DataFrame]]]:
+        input_data: Optional[Dict[str, List[pd.DataFrame]]] = None
+    ) -> List[pd.DataFrame]:
+        """
+        Execute a single node with comprehensive error handling and telemetry.
         
-        # Create Step Run
-        step_run = self.state_manager.create_step_run(
-            pipeline_run.id, node.id, node.operator_type, node.order_index
-        )
-        
-        DBLogger.log_step(
-            self.state_manager.db,
-            step_run.id,
-            "INFO",
-            f"Starting node '{node.name}' ({node.operator_type.value})..."
-        )
-
-        attempts = 0
-        max_attempts = (node.max_retries or 0) + 1
-
-        while attempts < max_attempts:
-            attempts += 1
-            try:
-                if attempts > 1:
-                    DBLogger.log_step(
-                        self.state_manager.db, 
-                        step_run.id, 
-                        "WARNING", 
-                        f"Retrying node (attempt {attempts}/{max_attempts})"
-                    )
-
-                # --- Core Execution Logic ---
-                result = self._execute_core(pipeline_run, node, step_run, input_data)
-                return result
-
-            except Exception as e:
-                import time
-                if attempts < max_attempts:
-                    time.sleep(1)
-                    continue
-                
-                # Final failure
-                self.state_manager.update_step_status(
-                    step_run, OperatorRunStatus.FAILED, 0, 0, 0, e
-                )
-                raise e
-
-    def _execute_core(self, pipeline_run, node, step_run, input_data):
+        Args:
+            pipeline_run: Current pipeline run
+            node: Node to execute
+            input_data: Input data from upstream nodes
+            
+        Returns:
+            List of output DataFrames (materialized chunks)
+        """
         db = self.state_manager.db
         
-        # 1. Setup Connectors
-        source_connector = None
-        destination_connector = None
-        source_asset = None
-        dest_asset = None
-        watermark = None
-
-        if node.source_asset_id:
-            source_asset, source_conn = self._fetch_asset_connection(db, node.source_asset_id)
-            cfg = VaultService.get_connector_config(source_conn)
-            source_connector = ConnectorFactory.get_connector(source_conn.connector_type.value, cfg)
+        # Get or create step run
+        step_run = db.query(StepRun).filter(
+            StepRun.pipeline_run_id == pipeline_run.id,
+            StepRun.node_id == node.id
+        ).first()
+        
+        if not step_run:
+            step_run = self.state_manager.create_step_run(
+                pipeline_run.id, node.id, node.operator_type, node.order_index
+            )
+        
+        # Start execution
+        self.state_manager.update_step_status(step_run, OperatorRunStatus.RUNNING)
+        
+        logger.info(f"→ Starting node '{node.name}' (ID: {node.node_id})")
+        logger.info(f"  Type: {node.operator_type.value.upper()}")
+        logger.info(f"  Implementation: {node.operator_class}")
+        
+        DBLogger.log_step(
+            db, step_run.id, "INFO",
+            f"Node '{node.name}' execution started: "
+            f"Type={node.operator_type.value.upper()}, "
+            f"Class={node.operator_class}"
+        )
+        
+        # Initialize forensics and statistics
+        sniffer = ForensicSniffer(pipeline_run.id)
+        stats = {
+            "in": 0,
+            "out": 0,
+            "filtered": 0,
+            "error": 0,
+            "bytes": 0,
+            "chunks_in": 0,
+            "chunks_out": 0
+        }
+        sample_captured = None
+        results: List[pd.DataFrame] = []
+        
+        def on_chunk(chunk: pd.DataFrame, direction: str = "out"):
+            """Callback for chunk processing with telemetry"""
+            nonlocal sample_captured
             
-            if source_asset.is_incremental_capable:
-                watermark = db.query(Watermark).filter(
-                    Watermark.pipeline_id == pipeline_run.pipeline_id,
-                    Watermark.asset_id == source_asset.id
-                ).first()
-
-        if node.destination_asset_id:
-            dest_asset, dest_conn = self._fetch_asset_connection(db, node.destination_asset_id)
-            cfg = VaultService.get_connector_config(dest_conn)
-            destination_connector = ConnectorFactory.get_connector(dest_conn.connector_type.value, cfg)
-
-        is_sink = destination_connector is not None and dest_asset is not None
-
-        # 2. Define Data Factory
-        data_factory = None
-
-        if source_connector and source_asset:
-            def src_factory():
-                records_in = 0
-                bytes_in = 0
-                try:
-                    read_params = {"asset": source_asset.name}
-                    if source_asset.config:
-                        read_params.update(source_asset.config)
-                    if watermark and watermark.last_value:
-                        read_params["incremental_filter"] = watermark.last_value
-
-                    with source_connector.session() as conn:
-                        for chunk in conn.read_batch(**read_params):
-                            records_in += len(chunk)
-                            bytes_in += int(chunk.memory_usage(deep=True).sum())
+            if chunk.empty:
+                return
+            
+            # Capture sample data (first chunk only)
+            if direction == "out" and sample_captured is None:
+                sample_captured = self._sniff_data(chunk)
+            
+            # Forensic capture
+            sniffer.capture_chunk(node.id, chunk, direction=direction)
+            
+            # Update statistics
+            chunk_rows = len(chunk)
+            chunk_bytes = int(chunk.memory_usage(deep=True).sum())
+            
+            if direction == "out":
+                stats["out"] += chunk_rows
+                stats["bytes"] += chunk_bytes
+                stats["chunks_out"] += 1
+            else:
+                stats["in"] += chunk_rows
+                stats["chunks_in"] += 1
+            
+            # Broadcast real-time telemetry
+            self.state_manager.update_step_status(
+                step_run,
+                OperatorRunStatus.RUNNING,
+                stats["in"],
+                stats["out"],
+                stats["filtered"],
+                stats["error"],
+                stats["bytes"]
+            )
+        
+        try:
+            op_type = node.operator_type
+            
+            # =====================================================================
+            # A. EXTRACT Operation
+            # =====================================================================
+            if op_type == OperatorType.EXTRACT:
+                asset, conn = self._fetch_asset_connection(db, node.source_asset_id)
+                
+                logger.info(f"  Source: {conn.connector_type.value.upper()} / {asset.name}")
+                DBLogger.log_step(
+                    db, step_run.id, "INFO",
+                    f"Extracting from {conn.connector_type.value.upper()} asset: '{asset.name}'"
+                )
+                
+                # Get connector configuration
+                cfg = VaultService.get_connector_config(conn)
+                connector = ConnectorFactory.get_connector(conn.connector_type.value, cfg)
+                
+                # Handle incremental loading
+                current_wm, inc_filter = None, None
+                if asset.is_incremental_capable:
+                    current_wm, inc_filter = self._fetch_watermark(
+                        pipeline_run.pipeline_id, asset.id
+                    )
+                    if current_wm:
+                        logger.info(f"  Incremental: Resuming from watermark={current_wm}")
+                        DBLogger.log_step(
+                            db, step_run.id, "INFO",
+                            f"Incremental load: watermark={current_wm}"
+                        )
+                
+                # Prepare read parameters
+                read_params = {"asset": asset.name}
+                if asset.config:
+                    read_params.update(asset.config)
+                if inc_filter:
+                    read_params["incremental_filter"] = inc_filter
+                
+                wm_col = self._get_watermark_column(asset) if asset.is_incremental_capable else None
+                max_val = None
+                
+                # Extract data
+                logger.info(f"  Extracting data in batches...")
+                with connector.session() as session:
+                    for chunk_idx, chunk in enumerate(session.read_batch(**read_params), 1):
+                        on_chunk(chunk, direction="out")
+                        
+                        # Apply watermark filter
+                        if wm_col and current_wm:
+                            before_count = len(chunk)
+                            chunk = self._apply_watermark_filter(chunk, wm_col, current_wm)
+                            after_count = len(chunk)
+                            stats["filtered"] += (before_count - after_count)
+                            
+                            if chunk.empty:
+                                continue
+                        
+                        # Track high watermark
+                        if wm_col:
+                            max_val = self._track_high_watermark(chunk, wm_col, max_val)
+                        
+                        results.append(chunk)
+                        
+                        if chunk_idx % 10 == 0:
+                            logger.debug(f"    Processed {chunk_idx} chunks, {stats['out']:,} rows")
+                
+                # Persist watermark
+                if max_val is not None:
+                    self._persist_watermark(
+                        pipeline_run.pipeline_id, asset.id, wm_col, max_val
+                    )
+                    logger.info(f"  ✓ New watermark persisted: {max_val}")
+                    DBLogger.log_step(
+                        db, step_run.id, "INFO",
+                        f"Watermark updated: {max_val}"
+                    )
+            
+            # =====================================================================
+            # B. LOAD Operation
+            # =====================================================================
+            elif op_type == OperatorType.LOAD:
+                asset, conn = self._fetch_asset_connection(db, node.destination_asset_id)
+                
+                logger.info(f"  Target: {conn.connector_type.value.upper()} / {asset.name}")
+                DBLogger.log_step(
+                    db, step_run.id, "INFO",
+                    f"Loading to {conn.connector_type.value.upper()} target: '{asset.name}'"
+                )
+                
+                # Get connector
+                cfg = VaultService.get_connector_config(conn)
+                connector = ConnectorFactory.get_connector(conn.connector_type.value, cfg)
+                
+                # Prepare sink stream
+                def sink_stream():
+                    for uid, chunks in (input_data or {}).items():
+                        logger.debug(f"  Processing input from '{uid}': {len(chunks)} chunks")
+                        for chunk in chunks:
+                            on_chunk(chunk, direction="in")
+                            on_chunk(chunk, direction="out")
+                            yield chunk
+                
+                # Write data
+                write_mode = (asset.config or {}).get("write_mode", "append")
+                logger.info(f"  Write mode: {write_mode.upper()}")
+                DBLogger.log_step(db, step_run.id, "INFO", f"Write mode: {write_mode.upper()}")
+                
+                with connector.session() as session:
+                    records_out = session.write_batch(
+                        sink_stream(),
+                        asset=asset.name,
+                        mode=write_mode
+                    )
+                    stats["out"] = records_out
+                
+                logger.info(f"  ✓ Loaded {records_out:,} records")
+                DBLogger.log_step(
+                    db, step_run.id, "INFO",
+                    f"Successfully loaded {records_out:,} records"
+                )
+            
+            # =====================================================================
+            # C. TRANSFORM / JOIN / SET Operations
+            # =====================================================================
+            elif op_type in {
+                OperatorType.TRANSFORM,
+                OperatorType.JOIN,
+                OperatorType.UNION,
+                OperatorType.MERGE,
+                OperatorType.VALIDATE,
+                OperatorType.NOOP
+            }:
+                # Prepare input iterators
+                input_iters = {}
+                for uid, chunks in (input_data or {}).items():
+                    logger.debug(f"  Input from '{uid}': {len(chunks)} chunks")
+                    DBLogger.log_step(
+                        db, step_run.id, "INFO",
+                        f"Input from '{uid}': {len(chunks)} chunks, "
+                        f"{sum(len(c) for c in chunks):,} rows"
+                    )
+                    
+                    def make_it(c):
+                        for chunk in c:
+                            on_chunk(chunk, direction="in")
                             yield chunk
                     
-                    if not is_sink:
-                        self.state_manager.update_step_status(
-                            step_run, OperatorRunStatus.SUCCESS, records_in, records_in, bytes_in
-                        )
-                except Exception as e:
-                    self.state_manager.update_step_status(
-                        step_run, OperatorRunStatus.FAILED, records_in, 0, bytes_in, e
+                    input_iters[uid] = make_it(chunks)
+                
+                # Execute transform logic
+                data_iter = None
+                
+                if op_type in {OperatorType.JOIN, OperatorType.UNION, OperatorType.MERGE}:
+                    logger.info(f"  Applying multi-input operation: {op_type.value.upper()}")
+                    DBLogger.log_step(
+                        db, step_run.id, "INFO",
+                        f"Multi-input operation: {op_type.value.upper()}"
                     )
-                    raise e
-            
-            data_factory = src_factory
-
-        elif input_data:
-            # Multi-Input
-            if node.operator_type in {OperatorType.MERGE, OperatorType.UNION, OperatorType.JOIN}:
-                def multi_input_factory():
-                    records_in = 0
-                    records_out = 0
-                    bytes_out = 0
-                    try:
-                        input_iterators = {}
-                        for uid, ufactory in input_data.items():
-                            input_iterators[uid] = ufactory()
+                    
+                    transform = TransformFactory.get_transform(node.operator_class, node.config)
+                    data_iter = transform.transform_multi(input_iters)
+                
+                else:
+                    # Single input transform
+                    if not input_iters:
+                        logger.warning(f"  No input data for transform node")
+                        data_iter = iter([])
+                    else:
+                        upstream_it = next(iter(input_iters.values()))
                         
-                        # We need to wrap inputs to count IN records
-                        counted_inputs = {}
-                        def make_counter(iter_):
-                            for chunk in iter_:
-                                nonlocal records_in
-                                records_in += len(chunk)
-                                yield chunk
-
-                        for uid, iter_ in input_iterators.items():
-                            counted_inputs[uid] = make_counter(iter_)
-                        
-                        transform = TransformFactory.get_transform(node.operator_class, node.config)
-                        output = transform.transform_multi(counted_inputs)
-                        
-                        for chunk in output:
-                            records_out += len(chunk)
-                            bytes_out += int(chunk.memory_usage(deep=True).sum())
-                            yield chunk
-                        
-                        if not is_sink:
-                            self.state_manager.update_step_status(
-                                step_run, OperatorRunStatus.SUCCESS, records_in, records_out, bytes_out
+                        try:
+                            logger.info(f"  Applying transform: {node.operator_class}")
+                            transform = TransformFactory.get_transform(
+                                node.operator_class, node.config
                             )
-                    except Exception as e:
-                        self.state_manager.update_step_status(
-                            step_run, OperatorRunStatus.FAILED, records_in, records_out, bytes_out, e
-                        )
-                        raise e
-                
-                data_factory = multi_input_factory
-            
-            # Single Input / Transform
-            else:
-                upstream_factory = next(iter(input_data.values()))
-                
-                def transform_factory():
-                    stats = {"in": 0, "out": 0, "bytes": 0}
-                    try:
-                        upstream_iter = upstream_factory()
+                            data_iter = transform.transform(upstream_it)
                         
-                        def input_counter():
-                            for chunk in upstream_iter:
-                                stats["in"] += len(chunk)
-                                yield chunk
-                        
-                        data_iter = input_counter()
-                        transformed = data_iter
-                        
-                        if node.operator_type == OperatorType.TRANSFORM:
-                            transform = TransformFactory.get_transform(node.operator_class, node.config)
-                            transformed = transform.transform(data_iter)
-                        
-                        for chunk in transformed:
-                            stats["out"] += len(chunk)
-                            stats["bytes"] += int(chunk.memory_usage(deep=True).sum())
-                            yield chunk
-                        
-                        if not is_sink:
-                            self.state_manager.update_step_status(
-                                step_run, OperatorRunStatus.SUCCESS, stats["in"], stats["out"], stats["bytes"]
+                        except Exception as e:
+                            logger.warning(
+                                f"  Transform '{node.operator_class}' not found, "
+                                f"using pass-through: {e}"
                             )
-                    except Exception as e:
-                        self.state_manager.update_step_status(
-                            step_run, OperatorRunStatus.FAILED, stats["in"], stats["out"], stats["bytes"], e
-                        )
-                        raise e
+                            DBLogger.log_step(
+                                db, step_run.id, "WARNING",
+                                f"Transform '{node.operator_class}' not found, pass-through mode"
+                            )
+                            data_iter = upstream_it
                 
-                data_factory = transform_factory
-        else:
-            def empty_factory():
-                return iter([])
-            data_factory = empty_factory
-
-        # 3. Execution (Sink vs Intermediate)
-        if is_sink:
-            # SINK: Eager Execution
-            data_iter = data_factory()
-            sink_stats = {"in": 0, "bytes": 0}
-            
-            def sink_wrapper():
+                # Materialize results
+                chunk_count = 0
                 for chunk in data_iter:
-                    sink_stats["in"] += len(chunk)
-                    sink_stats["bytes"] += int(chunk.memory_usage(deep=True).sum())
-                    yield chunk
-            
-            with destination_connector.session() as conn:
-                records_out = conn.write_batch(sink_wrapper(), asset=dest_asset.name)
-            
-            # Update Watermark
-            if source_asset and source_asset.is_incremental_capable:
-                if not watermark:
-                    watermark = Watermark(
-                        pipeline_id=pipeline_run.pipeline_id,
-                        asset_id=source_asset.id,
-                        watermark_type="timestamp"
-                    )
-                    db.add(watermark)
+                    chunk_count += 1
+                    on_chunk(chunk, direction="out")
+                    results.append(chunk)
+                    
+                    if chunk_count % 10 == 0:
+                        logger.debug(f"    Processed {chunk_count} chunks, {stats['out']:,} rows")
                 
-                col = "timestamp"
-                if source_asset.config and "watermark_column" in source_asset.config:
-                    col = source_asset.config["watermark_column"]
-                
-                watermark.last_value = {col: datetime.now(timezone.utc).isoformat()}
-                watermark.last_updated = datetime.now(timezone.utc)
-                db.add(watermark)
-
+                logger.info(f"  ✓ Transform complete: {stats['out']:,} rows, {chunk_count} chunks")
+            
+            # =====================================================================
+            # Finalize Success
+            # =====================================================================
+            cpu, mem = self._get_process_metrics()
+            
             self.state_manager.update_step_status(
-                step_run, OperatorRunStatus.SUCCESS, sink_stats["in"], records_out, sink_stats["bytes"]
+                step_run,
+                OperatorRunStatus.SUCCESS,
+                stats["in"],
+                stats["out"],
+                stats["filtered"],
+                stats["error"],
+                stats["bytes"],
+                0,  # retry_count
+                cpu,
+                mem,
+                sample_captured
             )
+            
+            duration = step_run.duration_seconds or 0
+            logger.info(f"← Node '{node.name}' completed successfully")
+            logger.info(f"  Records IN: {stats['in']:,}, OUT: {stats['out']:,}")
+            logger.info(f"  Duration: {duration:.2f}s")
+            logger.info(f"  Resources: CPU={cpu:.1f}%, Memory={mem:.1f}MB")
+            
+            DBLogger.log_step(
+                db, step_run.id, "SUCCESS",
+                f"Node '{node.name}' completed: "
+                f"{stats['out']:,} records, {duration:.2f}s, "
+                f"CPU={cpu:.1f}%, MEM={mem:.1f}MB"
+            )
+            
+            return results
+        
+        except Exception as e:
+            # =====================================================================
+            # Handle Failure
+            # =====================================================================
+            cpu, mem = self._get_process_metrics()
+            
+            self.state_manager.update_step_status(
+                step_run,
+                OperatorRunStatus.FAILED,
+                stats["in"],
+                stats["out"],
+                stats["filtered"],
+                stats["error"],
+                stats["bytes"],
+                0,  # retry_count
+                cpu,
+                mem,
+                sample_captured,
+                e
+            )
+            
+            logger.error(f"✗ Node '{node.name}' FAILED: {str(e)}", exc_info=True)
+            DBLogger.log_step(db, step_run.id, "ERROR", f"Node failed: {str(e)}")
+            
+            raise e
+    
+    # =========================================================================
+    # Watermark Management
+    # =========================================================================
+    
+    def _get_watermark_column(self, asset: Asset) -> Optional[str]:
+        """Extract watermark column from asset configuration"""
+        if not asset.config:
             return None
-        else:
-            # INTERMEDIATE: Return Factory
-            return data_factory
+        return asset.config.get("watermark_column") or asset.config.get("WATERMARK_COLUMN")
+    
+    def _fetch_watermark(
+        self, pipeline_id: int, asset_id: int
+    ) -> Tuple[Any, Optional[Dict]]:
+        """Fetch current watermark value for incremental processing"""
+        wm_record = self.state_manager.db.query(Watermark).filter(
+            Watermark.pipeline_id == pipeline_id,
+            Watermark.asset_id == asset_id
+        ).first()
+        
+        if not wm_record or not wm_record.last_value:
+            return None, None
+        
+        val = next(iter(wm_record.last_value.values()))
+        return val, {**wm_record.last_value, "high_watermark": val}
+    
+    def _apply_watermark_filter(
+        self, chunk: pd.DataFrame, wm_col: Optional[str], current_wm_value: Any
+    ) -> pd.DataFrame:
+        """Filter chunk based on watermark value"""
+        if current_wm_value is None or not wm_col:
+            return chunk
+        
+        # Find actual column (case-insensitive)
+        actual_col = next(
+            (c for c in chunk.columns if c.lower() == wm_col.lower()),
+            None
+        )
+        
+        if not actual_col:
+            logger.warning(f"Watermark column '{wm_col}' not found in data")
+            return chunk
+        
+        try:
+            series = chunk[actual_col]
+            
+            # Handle different data types
+            if pd.api.types.is_numeric_dtype(series):
+                return chunk[series > pd.to_numeric(current_wm_value)]
+            
+            if pd.api.types.is_datetime64_any_dtype(series):
+                wm_datetime = pd.to_datetime(current_wm_value)
+                if series.dt.tz is not None:
+                    wm_datetime = wm_datetime.replace(tzinfo=series.dt.tz)
+                return chunk[pd.to_datetime(series) > wm_datetime]
+            
+            # String comparison
+            return chunk[series.astype(str) > str(current_wm_value)]
+        
+        except Exception as e:
+            logger.error(f"Watermark filter failed: {e}")
+            return chunk
+    
+    def _track_high_watermark(
+        self, chunk: pd.DataFrame, wm_col: Optional[str], current_max: Any
+    ) -> Any:
+        """Track the highest watermark value in chunk"""
+        if not wm_col:
+            return current_max
+        
+        actual_col = next(
+            (c for c in chunk.columns if c.lower() == wm_col.lower()),
+            None
+        )
+        
+        if not actual_col:
+            return current_max
+        
+        try:
+            new_max = chunk[actual_col].max()
+            
+            # Convert Timestamp to datetime
+            if hasattr(new_max, 'to_pydatetime'):
+                new_max = new_max.to_pydatetime()
+            
+            if current_max is None or new_max > current_max:
+                return new_max
+            
+            return current_max
+        
+        except Exception as e:
+            logger.error(f"Watermark tracking failed: {e}")
+            return current_max
+    
+    def _persist_watermark(
+        self, pipeline_id: int, asset_id: int, wm_col: str, max_val: Any
+    ):
+        """Persist watermark value to database"""
+        from app.db.session import SessionLocal
+        from app.models.execution import Watermark
+        
+        with SessionLocal() as session:
+            t_wm = session.query(Watermark).filter(
+                Watermark.pipeline_id == pipeline_id,
+                Watermark.asset_id == asset_id
+            ).first()
+            
+            if not t_wm:
+                t_wm = Watermark(
+                    pipeline_id=pipeline_id,
+                    asset_id=asset_id,
+                    watermark_type="timestamp"
+                )
+                session.add(t_wm)
+            
+            # Format value
+            if hasattr(max_val, 'isoformat'):
+                value_str = max_val.isoformat()
+            else:
+                value_str = str(max_val)
+            
+            t_wm.last_value = {wm_col or "watermark": value_str}
+            t_wm.last_updated = datetime.now(timezone.utc)
+            
+            session.commit()
+            logger.debug(f"Watermark persisted: {wm_col}={value_str}")

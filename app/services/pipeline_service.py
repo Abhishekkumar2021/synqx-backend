@@ -7,7 +7,7 @@ from sqlalchemy import and_
 
 from app.models.pipelines import Pipeline, PipelineVersion, PipelineNode, PipelineEdge
 from app.models.execution import Job
-from app.models.enums import PipelineStatus, JobStatus, OperatorType
+from app.models.enums import PipelineStatus, JobStatus, OperatorType, RetryStrategy
 from app.schemas.pipeline import (
     PipelineCreate,
     PipelineVersionCreate,

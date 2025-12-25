@@ -1,83 +1,447 @@
-from typing import Dict, Callable, Iterator, Optional
+"""
+=================================================================================
+FILE 1: pipeline_runner.py - Enhanced DAG Runner
+=================================================================================
+"""
+
+from typing import Dict, List, Optional, Set
 import pandas as pd
 from sqlalchemy.orm import Session
-from collections import defaultdict
 import concurrent.futures
+import time
+from datetime import datetime, timezone
 
 from app.engine.dag import DAG, DagCycleError
-from app.models.pipelines import PipelineVersion
-from app.core.errors import ConfigurationError
+from app.models.pipelines import PipelineVersion, PipelineNode
+from app.models.execution import PipelineRun
+from app.core.errors import ConfigurationError, PipelineExecutionError
 from app.core.logging import get_logger
+from app.core.db_logging import DBLogger
 from app.engine.runner_core.state_manager import StateManager
 from app.engine.runner_core.node_executor import NodeExecutor
+from app.engine.runner_core.data_cache import DataCache
+from app.engine.runner_core.execution_metrics import ExecutionMetrics
+from app.db.session import SessionLocal
 
 logger = get_logger(__name__)
 
+
+class ParallelExecutionLayer:
+    """Manages parallel execution of independent nodes within the same DAG layer"""
+
+    def __init__(self, max_workers: int = 4):
+        self.max_workers = max_workers
+
+    def execute_layer(
+        self,
+        nodes: List[PipelineNode],
+        pipeline_run: PipelineRun,
+        data_cache: DataCache,
+        dag: DAG,
+        state_manager: StateManager,
+        job_id: int,
+    ) -> Dict[str, List[pd.DataFrame]]:
+        """Execute all nodes in a layer in parallel"""
+        results = {}
+        errors = []
+
+        if len(nodes) == 1:
+            # Single node - execute directly without threading overhead
+            node = nodes[0]
+            try:
+                result = self._execute_single_node(
+                    node, pipeline_run, data_cache, dag, state_manager, job_id
+                )
+                results[node.node_id] = result
+                logger.info(f"✓ Node '{node.node_id}' completed ({len(result)} chunks)")
+            except Exception as e:
+                errors.append((node.node_id, e))
+                logger.error(f"✗ Node '{node.node_id}' failed: {e}", exc_info=True)
+        else:
+            # Multiple nodes - parallel execution
+            actual_workers = min(self.max_workers, len(nodes))
+            logger.info(
+                f"Parallel execution: {len(nodes)} nodes with {actual_workers} workers"
+            )
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=actual_workers
+            ) as executor:
+                future_to_node = {
+                    executor.submit(
+                        self._execute_single_node,
+                        node,
+                        pipeline_run,
+                        data_cache,
+                        dag,
+                        state_manager,
+                        job_id,
+                    ): node
+                    for node in nodes
+                }
+
+                for future in concurrent.futures.as_completed(future_to_node):
+                    node = future_to_node[future]
+                    try:
+                        result = future.result(timeout=3600)  # 1 hour timeout per node
+                        results[node.node_id] = result
+                        logger.info(
+                            f"✓ Node '{node.node_id}' completed ({len(result)} chunks)"
+                        )
+                    except concurrent.futures.TimeoutError:
+                        errors.append(
+                            (node.node_id, Exception("Execution timeout (1 hour)"))
+                        )
+                        logger.error(f"✗ Node '{node.node_id}' timed out")
+                    except Exception as e:
+                        errors.append((node.node_id, e))
+                        logger.error(
+                            f"✗ Node '{node.node_id}' failed: {e}", exc_info=True
+                        )
+
+        if errors:
+            error_summary = "; ".join([f"{nid}: {str(e)}" for nid, e in errors])
+            raise PipelineExecutionError(f"Layer execution failed: {error_summary}")
+
+        return results
+
+    def _execute_single_node(
+        self,
+        node: PipelineNode,
+        pipeline_run: PipelineRun,
+        data_cache: DataCache,
+        dag: DAG,
+        state_manager: StateManager,
+        job_id: int,
+    ) -> List[pd.DataFrame]:
+        """Execute a single node with proper session management"""
+        node_start = time.time()
+
+        with SessionLocal() as session:
+            # Re-fetch objects in this thread's session
+            t_pipeline_run = (
+                session.query(PipelineRun)
+                .filter(PipelineRun.id == pipeline_run.id)
+                .first()
+            )
+            t_node = (
+                session.query(PipelineNode).filter(PipelineNode.id == node.id).first()
+            )
+
+            if not t_pipeline_run or not t_node:
+                raise PipelineExecutionError(
+                    f"Failed to load pipeline run or node {node.node_id} in thread"
+                )
+
+            # Create thread-local state manager and executor
+            t_state_manager = StateManager(session, job_id)
+            t_node_executor = NodeExecutor(t_state_manager)
+
+            # Prepare input data from cache
+            upstream_ids = dag.get_upstream_nodes(node.node_id)
+            input_data = {}
+
+            for uid in upstream_ids:
+                chunks = data_cache.retrieve(uid)
+                input_data[uid] = chunks
+                logger.debug(
+                    f"Node '{node.node_id}' loaded {len(chunks)} chunks from '{uid}'"
+                )
+
+            # Execute node
+            logger.info(
+                f"→ Executing node '{node.node_id}' (type: {node.operator_type.value})"
+            )
+            results = t_node_executor.execute(t_pipeline_run, t_node, input_data)
+
+            node_duration = time.time() - node_start
+            total_rows = sum(len(df) for df in results)
+            logger.info(
+                f"← Node '{node.node_id}' completed: {total_rows:,} rows, "
+                f"{len(results)} chunks in {node_duration:.2f}s"
+            )
+
+            return results
+
+
 class PipelineRunner:
-    def __init__(self):
-        pass
+    """
+    Production-Grade DAG Pipeline Runner
+
+    Features:
+    - Layer-based parallel execution for independent nodes
+    - Intelligent memory management with cache eviction
+    - Comprehensive error handling and recovery
+    - Real-time metrics and telemetry
+    - Detailed execution logging with visual indicators
+    """
+
+    def __init__(self, max_parallel_nodes: int = 4, max_cache_memory_mb: int = 2048):
+        self.max_parallel_nodes = max_parallel_nodes
+        self.max_cache_memory_mb = max_cache_memory_mb
+        self.metrics = ExecutionMetrics()
 
     def _build_dag(self, pipeline_version: PipelineVersion) -> DAG:
+        """Build and validate DAG from pipeline version"""
+        logger.info(
+            f"Building DAG: {len(pipeline_version.nodes)} nodes, {len(pipeline_version.edges)} edges"
+        )
+
         dag = DAG()
         node_map = {node.id: node for node in pipeline_version.nodes}
+
+        # Add all nodes
         for node in pipeline_version.nodes:
             dag.add_node(node.node_id)
+            logger.debug(f"  + Node: '{node.node_id}' ({node.operator_type.value})")
+
+        # Add all edges with validation
         for edge in pipeline_version.edges:
-            f, t = node_map.get(edge.from_node_id), node_map.get(edge.to_node_id)
-            if not f or not t or f.node_id == t.node_id:
+            from_node = node_map.get(edge.from_node_id)
+            to_node = node_map.get(edge.to_node_id)
+
+            if not from_node or not to_node:
                 raise ConfigurationError(
-                    f"Invalid edge: {edge.from_node_id}->{edge.to_node_id}"
+                    f"Invalid edge: references non-existent node "
+                    f"({edge.from_node_id} -> {edge.to_node_id})"
                 )
-            dag.add_edge(f.node_id, t.node_id)
-        
+
+            if from_node.node_id == to_node.node_id:
+                raise ConfigurationError(
+                    f"Self-loop detected: node '{from_node.node_id}' cannot connect to itself"
+                )
+
+            dag.add_edge(from_node.node_id, to_node.node_id)
+            logger.debug(f"  → Edge: '{from_node.node_id}' → '{to_node.node_id}'")
+
+        # Validate DAG structure (detect cycles)
         try:
-            dag.topological_sort()
+            order = dag.topological_sort()
+            logger.info(
+                f"✓ DAG validation successful (topological order: {len(order)} nodes)"
+            )
         except DagCycleError as e:
             raise ConfigurationError(
-                f"Pipeline {pipeline_version.id} contains a cycle: {e}"
+                f"Pipeline {pipeline_version.id} contains cycle(s): {e}"
             )
+
         return dag
 
+    def _compute_execution_layers(
+        self, dag: DAG, node_map: Dict[str, PipelineNode]
+    ) -> List[List[PipelineNode]]:
+        """Compute execution layers for parallel processing"""
+        layers = []
+        executed = set()
+        all_nodes = set(node_map.keys())
+
+        logger.info("Computing execution layers...")
+
+        while executed != all_nodes:
+            # Find nodes whose dependencies are all satisfied
+            current_layer = []
+            for node_id in all_nodes - executed:
+                upstream = set(dag.get_upstream_nodes(node_id))
+                if upstream.issubset(executed):
+                    current_layer.append(node_map[node_id])
+
+            if not current_layer:
+                remaining = all_nodes - executed
+                raise PipelineExecutionError(
+                    f"Execution deadlock detected. Cannot schedule nodes: {remaining}"
+                )
+
+            layers.append(current_layer)
+            executed.update(node.node_id for node in current_layer)
+
+            logger.info(
+                f"  Layer {len(layers)}: {len(current_layer)} node(s) - "
+                f"[{', '.join(n.node_id for n in current_layer)}]"
+            )
+
+        return layers
+
+    def _cleanup_cache(
+        self, cache: DataCache, dag: DAG, completed_layer_nodes: Set[str]
+    ):
+        """Clean up cache for nodes no longer needed"""
+        cache_stats = cache.get_stats()
+
+        # Cleanup strategy: if utilization > 75%, clear old nodes
+        if cache_stats["utilization_pct"] > 75:
+            logger.warning(
+                f"High cache utilization: {cache_stats['utilization_pct']:.1f}% "
+                f"({cache_stats['memory_mb']:.2f}MB / {cache_stats['memory_limit_mb']}MB)"
+            )
+
+            # Clear nodes that have no downstream dependencies waiting
+            # This is a simple strategy - can be enhanced
+            for node_id in list(cache._cache.keys()):
+                downstream = dag.get_downstream_nodes(node_id)
+                if all(dn in completed_layer_nodes for dn in downstream):
+                    cache.clear_node(node_id)
+                    logger.debug(f"Cleared cache for completed node: '{node_id}'")
+
     def run(self, pipeline_version: PipelineVersion, db: Session, job_id: int) -> None:
+        """Execute pipeline with layer-based parallel processing"""
+
+        # Initialize metrics and state
+        self.metrics = ExecutionMetrics(total_nodes=len(pipeline_version.nodes))
+        self.metrics.execution_start = datetime.now(timezone.utc)
+
         state_manager = StateManager(db, job_id)
-        node_executor = NodeExecutor(state_manager)
-        
-        pipeline_run = state_manager.initialize_run(pipeline_version.pipeline_id, pipeline_version.id)
-        
+        data_cache = DataCache(max_memory_mb=self.max_cache_memory_mb)
+
+        # Initialize pipeline run
+        pipeline_run = state_manager.initialize_run(
+            pipeline_version.pipeline_id,
+            pipeline_version.id,
+            total_nodes=len(pipeline_version.nodes),
+        )
+
+        logger.info("=" * 80)
+        logger.info(f"PIPELINE EXECUTION STARTED")
+        logger.info(
+            f"Pipeline: {pipeline_version.pipeline_id}, Version: {pipeline_version.id}"
+        )
+        logger.info(f"Job ID: {job_id}, Run ID: {pipeline_run.id}")
+        logger.info(
+            f"Nodes: {len(pipeline_version.nodes)}, Max Parallel: {self.max_parallel_nodes}"
+        )
+        logger.info("=" * 80)
+
+        DBLogger.log_job(
+            db,
+            job_id,
+            "INFO",
+            f"Pipeline execution started: {len(pipeline_version.nodes)} nodes, "
+            f"max parallel: {self.max_parallel_nodes}, cache limit: {self.max_cache_memory_mb}MB",
+        )
+
         try:
+            # Build and validate DAG
             dag = self._build_dag(pipeline_version)
-            order = dag.topological_sort()
             node_map = {n.node_id: n for n in pipeline_version.nodes}
-            
-            # Stores factories: NodeID -> Factory
-            outputs: Dict[str, Callable[[], Iterator[pd.DataFrame]]] = defaultdict(lambda: (lambda: iter([])))
 
-            # Phase 1: Setup & Execution
-            # We execute in topological order. 
-            # Non-sink nodes return factories immediately.
-            # Sink nodes execute eagerly.
-            
-            # To support parallelism for sinks, we could collect sink tasks.
-            # For now, we keep it sequential for safety and simplicity in the refactor.
-            
-            for node_id in order:
-                node = node_map[node_id]
-                upstream_nodes = dag.get_upstream_nodes(node_id)
-                
-                input_data = None
-                if upstream_nodes:
-                    input_data = {
-                        uid: outputs[uid] for uid in upstream_nodes
-                    }
-                
-                result = node_executor.execute(pipeline_run, node, input_data)
-                
-                if result is not None:
-                    outputs[node_id] = result
+            # Compute execution layers
+            layers = self._compute_execution_layers(dag, node_map)
 
+            DBLogger.log_job(
+                db, job_id, "INFO", f"Execution plan computed: {len(layers)} layer(s)"
+            )
+
+            # Execute layers sequentially, nodes within layer in parallel
+            parallel_executor = ParallelExecutionLayer(
+                max_workers=self.max_parallel_nodes
+            )
+
+            for layer_idx, layer_nodes in enumerate(layers, 1):
+                layer_start = time.time()
+
+                logger.info("")
+                logger.info(f"{'='*80}")
+                logger.info(
+                    f"LAYER {layer_idx}/{len(layers)}: {len(layer_nodes)} node(s)"
+                )
+                logger.info(f"Nodes: {', '.join(n.node_id for n in layer_nodes)}")
+                logger.info(f"{'='*80}")
+
+                DBLogger.log_job(
+                    db,
+                    job_id,
+                    "INFO",
+                    f"Layer {layer_idx}/{len(layers)}: Starting {len(layer_nodes)} node(s)",
+                )
+
+                # Execute layer
+                layer_results = parallel_executor.execute_layer(
+                    layer_nodes, pipeline_run, data_cache, dag, state_manager, job_id
+                )
+
+                # Cache results and update metrics
+                total_layer_records = 0
+                for node_id, results in layer_results.items():
+                    data_cache.store(node_id, results)
+                    self.metrics.completed_nodes += 1
+
+                    records = sum(len(df) for df in results)
+                    total_layer_records += records
+                    self.metrics.total_records_processed += records
+
+                # Memory management
+                completed_nodes = set(n.node_id for n in layer_nodes)
+                self._cleanup_cache(data_cache, dag, completed_nodes)
+
+                layer_duration = time.time() - layer_start
+                cache_stats = data_cache.get_stats()
+
+                logger.info(f"{'='*80}")
+                logger.info(
+                    f"✓ LAYER {layer_idx} COMPLETED: {layer_duration:.2f}s, "
+                    f"{total_layer_records:,} records"
+                )
+                logger.info(
+                    f"Cache: {cache_stats['cached_nodes']} nodes, "
+                    f"{cache_stats['memory_mb']:.2f}MB "
+                    f"({cache_stats['utilization_pct']:.1f}%)"
+                )
+                logger.info(
+                    f"Progress: {self.metrics.completed_nodes}/{self.metrics.total_nodes} nodes"
+                )
+                logger.info(f"{'='*80}")
+
+                DBLogger.log_job(
+                    db,
+                    job_id,
+                    "INFO",
+                    f"Layer {layer_idx} completed: {layer_duration:.2f}s, "
+                    f"{total_layer_records:,} records, "
+                    f"progress: {self.metrics.completed_nodes}/{self.metrics.total_nodes}",
+                )
+
+            # Finalize execution
+            self.metrics.execution_end = datetime.now(timezone.utc)
             state_manager.complete_run(pipeline_run)
 
+            # Log final summary
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info("PIPELINE EXECUTION COMPLETED SUCCESSFULLY")
+            logger.info(f"Duration: {self.metrics.duration_seconds:.2f}s")
+            logger.info(
+                f"Nodes Completed: {self.metrics.completed_nodes}/{self.metrics.total_nodes}"
+            )
+            logger.info(f"Records Processed: {self.metrics.total_records_processed:,}")
+            logger.info(
+                f"Throughput: {self.metrics.throughput_records_per_sec:.2f} records/sec"
+            )
+            logger.info("=" * 80)
+
+            summary = (
+                f"Pipeline execution completed. "
+                f"Duration: {self.metrics.duration_seconds:.2f}s, "
+                f"Nodes: {self.metrics.completed_nodes}/{self.metrics.total_nodes}, "
+                f"Records: {self.metrics.total_records_processed:,}, "
+                f"Throughput: {self.metrics.throughput_records_per_sec:.2f} rec/s"
+            )
+            DBLogger.log_job(db, job_id, "SUCCESS", summary)
+
         except Exception as e:
-            logger.error(f"Pipeline execution failed: {e}", exc_info=True)
+            self.metrics.execution_end = datetime.now(timezone.utc)
+            self.metrics.failed_nodes += 1
+
+            error_msg = (
+                f"Pipeline execution FAILED after {self.metrics.duration_seconds:.2f}s. "
+                f"Completed: {self.metrics.completed_nodes}/{self.metrics.total_nodes} nodes. "
+                f"Error: {str(e)}"
+            )
+
+            logger.error("=" * 80)
+            logger.error("PIPELINE EXECUTION FAILED")
+            logger.error(error_msg)
+            logger.error("=" * 80, exc_info=True)
+
+            DBLogger.log_job(db, job_id, "ERROR", error_msg)
             state_manager.fail_run(pipeline_run, e)
-            raise e
+
+            raise PipelineExecutionError(error_msg) from e
