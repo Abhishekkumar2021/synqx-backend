@@ -1,10 +1,12 @@
 from typing import Any, Dict, List, Optional, Iterator
 import pandas as pd
+import numpy as np
 import subprocess
 import tempfile
 import os
 import json
 import inspect
+import random
 from app.connectors.base import BaseConnector
 from app.core.errors import (
     ConfigurationError,
@@ -46,8 +48,8 @@ class CustomScriptConnector(BaseConnector):
             test_code = "print('ok')"
             # Reuse execute logic or just run subprocess directly for speed
             # Since we have _execute_python, let's try to verify imports work
-            local_scope = {"pd": pd}
-            exec("import pandas as pd", local_scope)
+            local_scope = {"pd": pd, "np": np}
+            exec("import pandas as pd; import numpy as np", local_scope)
             return True
         except Exception as e:
             logger.error(f"Custom Script environment check failed: {e}")
@@ -122,7 +124,11 @@ class CustomScriptConnector(BaseConnector):
             "pandas": pd,
             "json": json,
             "datetime": datetime,
-            "timedelta": timedelta
+            "timedelta": timedelta,
+            "random": random,
+            "os": os,
+            "np": numpy,
+            "numpy": numpy,
         }
         
         try:
@@ -185,8 +191,34 @@ class CustomScriptConnector(BaseConnector):
             if not filter_consumed and incremental_filter and isinstance(incremental_filter, dict):
                 # Fallback: Apply filter in memory since script didn't accept it
                 for col, val in incremental_filter.items():
+                    # Ensure val is a scalar
+                    if isinstance(val, (list, tuple, np.ndarray)) and len(val) > 0:
+                        val = val[0]
+                    elif isinstance(val, dict) and len(val) > 0:
+                        val = next(iter(val.values()))
+
                     if col in df.columns:
-                        df = df[df[col] > val]
+                        series = df[col]
+                        try:
+                            if pd.api.types.is_numeric_dtype(series):
+                                # Robust numeric conversion
+                                if isinstance(val, str):
+                                    threshold = float(val.strip().replace(',', ''))
+                                else:
+                                    threshold = float(val)
+                                
+                                # Use .values for reliability
+                                df = df[series.values > threshold]
+                            elif pd.api.types.is_datetime64_any_dtype(series):
+                                threshold = pd.to_datetime(val)
+                                if series.dt.tz is not None and threshold.tzinfo is None:
+                                    threshold = threshold.replace(tzinfo=timezone.utc)
+                                df = df[pd.to_datetime(series) > threshold]
+                            else:
+                                # String comparison fallback
+                                df = df[series.astype(str).values > str(val)]
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Fallback filter failed for column '{col}': {e}")
             
             if not df.empty:
                 yield df

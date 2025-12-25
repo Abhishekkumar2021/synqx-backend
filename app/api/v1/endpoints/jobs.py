@@ -380,10 +380,16 @@ def get_step_data(
         
         step = db.query(StepRun).filter(StepRun.id == step_id).first()
         if not step:
-            raise HTTPException(status_code=404, detail="Step run not found")
+            logger.error(f"Step run {step_id} not found")
+            raise HTTPException(status_code=404, detail=f"Step run {step_id} not found")
+        
+        if step.pipeline_run_id != run_id:
+            logger.error(f"Step run {step_id} does not belong to run {run_id}")
+            raise HTTPException(status_code=400, detail="Step run / Run ID mismatch")
         
         sniffer = ForensicSniffer(run_id)
         # We use node.id (the integer from pipeline_nodes) which is stored in step.node_id
+        logger.debug(f"Fetching forensic data for node {step.node_id}, run {run_id}, direction {direction}")
         data_slice = sniffer.fetch_slice(step.node_id, direction=direction, limit=limit, offset=offset)
         
         return {
@@ -397,8 +403,8 @@ def get_step_data(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching step data: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch forensic data sample")
+        logger.error(f"Error fetching step data for run {run_id}, step {step_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch forensic data: {str(e)}")
 
 
 @router.delete(

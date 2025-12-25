@@ -8,9 +8,16 @@ class ConnectionBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     connector_type: ConnectorType
     description: Optional[str] = Field(None, max_length=5000)
-    tags: Dict[str, Any] = Field(default_factory=dict)
+    tags: Optional[Dict[str, Any]] = Field(default_factory=dict)
     max_concurrent_connections: int = Field(default=5, ge=1, le=100)
     connection_timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def validate_tags(cls, v: Any) -> Dict[str, Any]:
+        if v is None:
+            return {}
+        return v
 
     @field_validator("name")
     @classmethod
@@ -112,9 +119,16 @@ class AssetBase(BaseModel):
     is_incremental_capable: bool = False
     description: Optional[str] = Field(None, max_length=5000)
     config: Optional[Dict[str, Any]] = None
-    tags: Dict[str, Any] = Field(default_factory=dict)
+    tags: Optional[Dict[str, Any]] = Field(default_factory=dict)
     row_count_estimate: Optional[int] = Field(None, ge=0)
     size_bytes_estimate: Optional[int] = Field(None, ge=0)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def validate_tags(cls, v: Any) -> Dict[str, Any]:
+        if v is None:
+            return {}
+        return v
 
     @field_validator("name")
     @classmethod

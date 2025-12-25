@@ -105,7 +105,8 @@ def execute_pipeline_task(self, job_id: int) -> str:
             # Mark job as running
             job.status = JobStatus.RUNNING
             job.started_at = datetime.now(timezone.utc)
-            job.retry_count = self.request.retries
+            # Use job.retry_count for manual retries, self.request.retries for celery autoretry
+            total_attempts = job.retry_count + self.request.retries + 1
             session.commit()
 
             # Broadcast global list update
@@ -118,7 +119,7 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 session,
                 job.id,
                 "INFO",
-                f"Job started (attempt {self.request.retries + 1})",
+                f"Job execution initiated (Attempt {total_attempts})",
                 source="worker",
             )
 
@@ -133,7 +134,7 @@ def execute_pipeline_task(self, job_id: int) -> str:
                         alert_type=AlertType.JOB_STARTED,
                         pipeline_id=job.pipeline_id,
                         job_id=job.id,
-                        message=f"Pipeline execution started (attempt {self.request.retries + 1})",
+                        message=f"Pipeline execution started (Attempt {self.request.retries + 1})",
                         level=AlertLevel.INFO
                     )
             except Exception as alert_err:
@@ -197,6 +198,16 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 
                 session.commit() 
 
+                # Broadcast final job status to UI
+                from app.core.websockets import manager
+                manager.broadcast_sync(f"job_telemetry:{job.id}", {
+                    "type": "job_update",
+                    "job_id": job.id,
+                    "status": job.status.value,
+                    "completed_at": job.completed_at.isoformat() if job.completed_at else None
+                })
+                manager.broadcast_sync("jobs_list", {"type": "job_list_update"})
+
                 # POST-PROCESSING (Alerts, Logs) - Wrap in try/except to not fail the task
                 try:
                     from app.services.alert_service import AlertService
@@ -210,7 +221,7 @@ def execute_pipeline_task(self, job_id: int) -> str:
                             message=f"Pipeline execution completed successfully",
                             level=AlertLevel.SUCCESS
                         )
-                    DBLogger.log_job(session, job.id, "INFO", "Job completed successfully", source="worker")
+                    DBLogger.log_job(session, job.id, "INFO", "Job processing finalized successfully", source="worker")
                 except Exception as post_err:
                     logger.error(f"Post-processing failed but job was successful: {post_err}")
 
@@ -406,6 +417,17 @@ def _mark_job_failed(
 
     session.commit()
 
+    # Broadcast final job status to UI
+    from app.core.websockets import manager
+    manager.broadcast_sync(f"job_telemetry:{job.id}", {
+        "type": "job_update",
+        "job_id": job.id,
+        "status": job.status.value,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "error_message": error_message
+    })
+    manager.broadcast_sync("jobs_list", {"type": "job_list_update"})
+
     # Trigger Alerts based on Config
     try:
         from app.services.alert_service import AlertService
@@ -424,7 +446,7 @@ def _mark_job_failed(
         logger.error(f"Failed to create alerts: {alert_err}")
 
     DBLogger.log_job(
-        session, job.id, "ERROR", f"Job failed: {error_message}", source="worker"
+        session, job.id, "ERROR", f"Job execution failed: {error_message}", source="worker"
     )
 
 
@@ -438,7 +460,7 @@ def _mark_job_retrying(session, job: Job, error_message: str) -> None:
         session,
         job.id,
         "WARNING",
-        f"Job will be retried: {error_message}",
+        f"Job will be retried automatically: {error_message}",
         source="worker",
     )
 

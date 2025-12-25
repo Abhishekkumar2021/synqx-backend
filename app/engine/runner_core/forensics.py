@@ -36,14 +36,18 @@ class ForensicSniffer:
 
     def __init__(self, run_id: int):
         self.run_id = run_id
-        self.base_dir = os.path.join("data", "forensics", f"run_{run_id}")
+        # Use absolute path to ensure consistency across different processes/workers
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        # Assuming app/engine/runner_core/forensics.py, we go up 3 levels to reach backend root
+        project_root = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
+        self.base_dir = os.path.join(project_root, "data", "forensics", f"run_{run_id}")
         os.makedirs(self.base_dir, exist_ok=True)
 
         self._write_lock = threading.Lock()
         self._row_counts: Dict[str, int] = {}
         self._metadata: Dict[str, Dict] = {}
 
-        logger.info(f"ForensicSniffer initialized for run {run_id} at {self.base_dir}")
+        logger.debug(f"ForensicSniffer initialized at {self.base_dir}")
         self._write_metadata()
 
     def capture_chunk(
@@ -55,12 +59,6 @@ class ForensicSniffer:
     ):
         """
         Thread-safe chunk capture with optimized batching.
-
-        Args:
-            node_id: Node identifier
-            chunk: DataFrame chunk to capture
-            direction: 'in' or 'out' (input/output)
-            metadata: Optional metadata about the capture
         """
         if chunk.empty:
             return
@@ -74,15 +72,9 @@ class ForensicSniffer:
             with self._write_lock:
                 current_rows = self._row_counts.get(file_key, 0)
 
-                # Check capacity limit
                 if current_rows >= self.MAX_ROWS_PER_FILE:
-                    logger.debug(
-                        f"Forensic cache full for node {node_id} ({direction}): "
-                        f"{current_rows} rows"
-                    )
                     return
 
-                # Determine how many rows we can add
                 available_space = self.MAX_ROWS_PER_FILE - current_rows
                 chunk_to_write = (
                     chunk.head(available_space)
@@ -90,29 +82,25 @@ class ForensicSniffer:
                     else chunk
                 )
 
-                # Write or append
                 if not os.path.exists(file_path):
                     chunk_to_write.to_parquet(
-                        file_path, index=False, compression=self.COMPRESSION
+                        file_path, index=False, compression=self.COMPRESSION, engine="pyarrow"
                     )
                     new_count = len(chunk_to_write)
                 else:
-                    existing = pd.read_parquet(file_path)
+                    existing = pd.read_parquet(file_path, engine="pyarrow")
                     combined = pd.concat([existing, chunk_to_write], ignore_index=True)
 
-                    # Enforce hard limit
                     if len(combined) > self.MAX_ROWS_PER_FILE:
                         combined = combined.head(self.MAX_ROWS_PER_FILE)
 
                     combined.to_parquet(
-                        file_path, index=False, compression=self.COMPRESSION
+                        file_path, index=False, compression=self.COMPRESSION, engine="pyarrow"
                     )
                     new_count = len(combined)
 
-                # Update tracking
                 self._row_counts[file_key] = new_count
 
-                # Store metadata
                 if file_key not in self._metadata:
                     self._metadata[file_key] = {
                         "node_id": node_id,
@@ -132,11 +120,6 @@ class ForensicSniffer:
                 if metadata:
                     self._metadata[file_key]["custom"] = metadata
 
-                logger.debug(
-                    f"Captured {len(chunk_to_write)} row(s) for node {node_id} ({direction}), "
-                    f"total: {new_count}"
-                )
-
         except Exception as e:
             logger.error(
                 f"Forensic capture failed for node {node_id} ({direction}): {e}"
@@ -146,16 +129,7 @@ class ForensicSniffer:
         self, node_id: int, direction: str = "out", limit: int = 100, offset: int = 0
     ) -> Dict[str, Any]:
         """
-        Read a slice of forensic data with pagination support.
-
-        Args:
-            node_id: Node identifier
-            direction: 'in' or 'out'
-            limit: Number of rows to return
-            offset: Starting row offset
-
-        Returns:
-            Dictionary with rows, columns, and metadata
+        Read a slice of forensic data with guaranteed JSON serialization and existence check.
         """
         try:
             file_path = os.path.join(
@@ -170,28 +144,29 @@ class ForensicSniffer:
                     "offset": offset,
                     "limit": limit,
                     "has_more": False,
+                    "found": False # Indicator for missing buffer
                 }
 
-            df = pd.read_parquet(file_path)
+            df = pd.read_parquet(file_path, engine="pyarrow")
             total = len(df)
 
-            # Apply pagination
             end_idx = min(offset + limit, total)
             slice_df = df.iloc[offset:end_idx]
 
-            # Replace NaN with None for JSON compliance
-            rows = slice_df.replace({np.nan: None}).to_dict(orient="records")
+            # Robust JSON serialization using pandas built-in handler for complex types
+            json_str = slice_df.to_json(orient="records", date_format="iso")
+            rows = json.loads(json_str)
 
             return {
                 "rows": rows,
                 "columns": list(df.columns),
-                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
                 "total_cached": total,
                 "offset": offset,
                 "limit": limit,
                 "returned": len(rows),
                 "has_more": end_idx < total,
                 "metadata": self._metadata.get(f"{node_id}_{direction}", {}),
+                "found": True
             }
 
         except Exception as e:

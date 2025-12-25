@@ -12,7 +12,9 @@ wheels/
 # Environments
 .env
 
-# Data files
+# Ignore entire folders and everything inside them
 data/
 logs/
+
+# Ignore all celery beat state files
 celerybeat-*

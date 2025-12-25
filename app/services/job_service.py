@@ -153,27 +153,35 @@ class JobService:
             raise AppError(f"Failed to retry job: {e}")
 
     def get_job_logs(self, job_id: int, level: Optional[str] = None) -> List[dict]:
-        """Get logs for a specific job, including step logs."""
-        # 1. Fetch Job Logs
-        job_logs_query = self.db_session.query(JobLog).filter(JobLog.job_id == job_id)
+        """Get logs for a specific job and all its retry attempts (via correlation_id)."""
+        # Fetch the job to get its correlation_id
+        job = self.get_job(job_id)
+        if not job:
+            return []
+            
+        correlation_id = job.correlation_id
+
+        # 1. Fetch Job Logs for ALL jobs with the same correlation_id
+        job_logs_query = (
+            self.db_session.query(JobLog)
+            .join(Job, JobLog.job_id == Job.id)
+            .filter(Job.correlation_id == correlation_id)
+        )
         if level:
             job_logs_query = job_logs_query.filter(JobLog.level == level)
         job_logs = job_logs_query.all()
 
-        # 2. Fetch Step Logs associated with this Job
-        # Find the pipeline run for this job
-        pipeline_run = self.db_session.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
-        
-        step_logs = []
-        if pipeline_run:
-            step_logs_query = (
-                self.db_session.query(StepLog)
-                .join(StepRun, StepLog.step_run_id == StepRun.id)
-                .filter(StepRun.pipeline_run_id == pipeline_run.id)
-            )
-            if level:
-                step_logs_query = step_logs_query.filter(StepLog.level == level)
-            step_logs = step_logs_query.all()
+        # 2. Fetch Step Logs associated with all runs of this job (via correlation_id)
+        step_logs_query = (
+            self.db_session.query(StepLog)
+            .join(StepRun, StepLog.step_run_id == StepRun.id)
+            .join(PipelineRun, StepRun.pipeline_run_id == PipelineRun.id)
+            .join(Job, PipelineRun.job_id == Job.id)
+            .filter(Job.correlation_id == correlation_id)
+        )
+        if level:
+            step_logs_query = step_logs_query.filter(StepLog.level == level)
+        step_logs = step_logs_query.all()
 
         # 3. Combine and Format
         unified_logs = []
@@ -202,7 +210,7 @@ class JobService:
                 "type": "step_log"
             })
 
-        # 4. Sort by timestamp
+        # 4. Sort by timestamp to preserve chronological order across attempts
         unified_logs.sort(key=lambda x: x["timestamp"])
         
         return unified_logs

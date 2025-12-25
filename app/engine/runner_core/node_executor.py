@@ -67,12 +67,16 @@ class NodeExecutor:
         return asset, conn
     
     def _sniff_data(self, df: pd.DataFrame, max_rows: int = 10) -> Optional[Dict]:
-        """Capture sample data for inspection"""
+        """Capture sample data for inspection with robust JSON handling"""
         try:
             if df.empty:
                 return None
             
-            sample = df.head(max_rows).replace({np.nan: None}).to_dict(orient="records")
+            # Use pandas built-in JSON conversion to handle Timestamps, etc.
+            sample_df = df.head(max_rows)
+            json_str = sample_df.to_json(orient="records", date_format="iso")
+            sample = json.loads(json_str)
+            
             return {
                 "rows": sample,
                 "columns": list(df.columns),
@@ -123,9 +127,7 @@ class NodeExecutor:
         
         DBLogger.log_step(
             db, step_run.id, "INFO",
-            f"Node '{node.name}' execution started: "
-            f"Type={node.operator_type.value.upper()}, "
-            f"Class={node.operator_class}"
+            f"Initializing task: {node.name} (Implementation: {node.operator_class})"
         )
         
         # Initialize forensics and statistics
@@ -164,6 +166,10 @@ class NodeExecutor:
                 stats["out"] += chunk_rows
                 stats["bytes"] += chunk_bytes
                 stats["chunks_out"] += 1
+                
+                # Optional: Log progress every few chunks for very large datasets
+                if stats["chunks_out"] % 50 == 0:
+                    DBLogger.log_step(db, step_run.id, "INFO", f"Processing in progress: {stats['out']:,} records streamed...")
             else:
                 stats["in"] += chunk_rows
                 stats["chunks_in"] += 1
@@ -191,7 +197,7 @@ class NodeExecutor:
                 logger.info(f"  Source: {conn.connector_type.value.upper()} / {asset.name}")
                 DBLogger.log_step(
                     db, step_run.id, "INFO",
-                    f"Extracting from {conn.connector_type.value.upper()} asset: '{asset.name}'"
+                    f"Establishing connection to {conn.connector_type.value.upper()} source: '{asset.name}'"
                 )
                 
                 # Get connector configuration
@@ -208,7 +214,7 @@ class NodeExecutor:
                         logger.info(f"  Incremental: Resuming from watermark={current_wm}")
                         DBLogger.log_step(
                             db, step_run.id, "INFO",
-                            f"Incremental load: watermark={current_wm}"
+                            f"Resuming incremental synchronization from offset: {current_wm}"
                         )
                 
                 # Prepare read parameters
@@ -254,7 +260,7 @@ class NodeExecutor:
                     logger.info(f"  ✓ New watermark persisted: {max_val}")
                     DBLogger.log_step(
                         db, step_run.id, "INFO",
-                        f"Watermark updated: {max_val}"
+                        f"Synchronization cursor updated: {max_val}"
                     )
             
             # =====================================================================
@@ -266,7 +272,7 @@ class NodeExecutor:
                 logger.info(f"  Target: {conn.connector_type.value.upper()} / {asset.name}")
                 DBLogger.log_step(
                     db, step_run.id, "INFO",
-                    f"Loading to {conn.connector_type.value.upper()} target: '{asset.name}'"
+                    f"Transmitting data to {conn.connector_type.value.upper()} target: '{asset.name}'"
                 )
                 
                 # Get connector
@@ -285,7 +291,6 @@ class NodeExecutor:
                 # Write data
                 write_mode = (asset.config or {}).get("write_mode", "append")
                 logger.info(f"  Write mode: {write_mode.upper()}")
-                DBLogger.log_step(db, step_run.id, "INFO", f"Write mode: {write_mode.upper()}")
                 
                 with connector.session() as session:
                     records_out = session.write_batch(
@@ -296,10 +301,6 @@ class NodeExecutor:
                     stats["out"] = records_out
                 
                 logger.info(f"  ✓ Loaded {records_out:,} records")
-                DBLogger.log_step(
-                    db, step_run.id, "INFO",
-                    f"Successfully loaded {records_out:,} records"
-                )
             
             # =====================================================================
             # C. TRANSFORM / JOIN / SET Operations
@@ -316,11 +317,6 @@ class NodeExecutor:
                 input_iters = {}
                 for uid, chunks in (input_data or {}).items():
                     logger.debug(f"  Input from '{uid}': {len(chunks)} chunks")
-                    DBLogger.log_step(
-                        db, step_run.id, "INFO",
-                        f"Input from '{uid}': {len(chunks)} chunks, "
-                        f"{sum(len(c) for c in chunks):,} rows"
-                    )
                     
                     def make_it(c):
                         for chunk in c:
@@ -336,7 +332,7 @@ class NodeExecutor:
                     logger.info(f"  Applying multi-input operation: {op_type.value.upper()}")
                     DBLogger.log_step(
                         db, step_run.id, "INFO",
-                        f"Multi-input operation: {op_type.value.upper()}"
+                        f"Executing multi-input operation: {op_type.value.upper()}"
                     )
                     
                     transform = TransformFactory.get_transform(node.operator_class, node.config)
@@ -352,6 +348,10 @@ class NodeExecutor:
                         
                         try:
                             logger.info(f"  Applying transform: {node.operator_class}")
+                            DBLogger.log_step(
+                                db, step_run.id, "INFO",
+                                f"Applying transformation logic: {node.operator_class}"
+                            )
                             transform = TransformFactory.get_transform(
                                 node.operator_class, node.config
                             )
@@ -364,7 +364,7 @@ class NodeExecutor:
                             )
                             DBLogger.log_step(
                                 db, step_run.id, "WARNING",
-                                f"Transform '{node.operator_class}' not found, pass-through mode"
+                                f"Transformation '{node.operator_class}' not found, utilizing pass-through mode"
                             )
                             data_iter = upstream_it
                 
@@ -407,9 +407,7 @@ class NodeExecutor:
             
             DBLogger.log_step(
                 db, step_run.id, "SUCCESS",
-                f"Node '{node.name}' completed: "
-                f"{stats['out']:,} records, {duration:.2f}s, "
-                f"CPU={cpu:.1f}%, MEM={mem:.1f}MB"
+                f"Task completed successfully: {stats['out']:,} records processed in {duration:.2f}s"
             )
             
             return results
@@ -436,7 +434,7 @@ class NodeExecutor:
             )
             
             logger.error(f"✗ Node '{node.name}' FAILED: {str(e)}", exc_info=True)
-            DBLogger.log_step(db, step_run.id, "ERROR", f"Node failed: {str(e)}")
+            DBLogger.log_step(db, step_run.id, "ERROR", f"Task failed: {str(e)}")
             
             raise e
     
@@ -468,10 +466,16 @@ class NodeExecutor:
     def _apply_watermark_filter(
         self, chunk: pd.DataFrame, wm_col: Optional[str], current_wm_value: Any
     ) -> pd.DataFrame:
-        """Filter chunk based on watermark value"""
+        """Filter chunk based on watermark value with maximum resiliency"""
         if current_wm_value is None or not wm_col:
             return chunk
         
+        # Ensure current_wm_value is a scalar
+        if isinstance(current_wm_value, (list, tuple, np.ndarray)) and len(current_wm_value) > 0:
+            current_wm_value = current_wm_value[0]
+        elif isinstance(current_wm_value, dict) and len(current_wm_value) > 0:
+            current_wm_value = next(iter(current_wm_value.values()))
+
         # Find actual column (case-insensitive)
         actual_col = next(
             (c for c in chunk.columns if c.lower() == wm_col.lower()),
@@ -479,33 +483,50 @@ class NodeExecutor:
         )
         
         if not actual_col:
-            logger.warning(f"Watermark column '{wm_col}' not found in data")
+            logger.warning(f"Watermark column '{wm_col}' not found in data. Available: {chunk.columns.tolist()}")
             return chunk
         
         try:
             series = chunk[actual_col]
             
-            # Handle different data types
+            # Handle numeric columns with explicit conversion and .values comparison
             if pd.api.types.is_numeric_dtype(series):
-                return chunk[series > pd.to_numeric(current_wm_value)]
+                try:
+                    # Robust numeric conversion
+                    if isinstance(current_wm_value, str):
+                        wm_val = float(current_wm_value.strip().replace(',', ''))
+                    else:
+                        wm_val = float(current_wm_value)
+                    
+                    # Use .values for a cleaner, often more resilient comparison
+                    return chunk[series.values > wm_val]
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to convert watermark '{current_wm_value}' to numeric for column '{actual_col}': {e}")
+                    return chunk
             
+            # Handle datetime columns
             if pd.api.types.is_datetime64_any_dtype(series):
-                wm_datetime = pd.to_datetime(current_wm_value)
-                if series.dt.tz is not None:
-                    wm_datetime = wm_datetime.replace(tzinfo=series.dt.tz)
-                return chunk[pd.to_datetime(series) > wm_datetime]
+                try:
+                    wm_datetime = pd.to_datetime(current_wm_value)
+                    if series.dt.tz is not None and wm_datetime.tzinfo is None:
+                        wm_datetime = wm_datetime.replace(tzinfo=timezone.utc)
+                    
+                    return chunk[pd.to_datetime(series) > wm_datetime]
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to convert watermark '{current_wm_value}' to datetime for column '{actual_col}': {e}")
+                    return chunk
             
-            # String comparison
-            return chunk[series.astype(str) > str(current_wm_value)]
+            # String comparison fallback (force both to string)
+            return chunk[series.astype(str).values > str(current_wm_value)]
         
         except Exception as e:
-            logger.error(f"Watermark filter failed: {e}")
+            logger.error(f"Watermark filter failed for column '{wm_col}': {e}", exc_info=True)
             return chunk
     
     def _track_high_watermark(
         self, chunk: pd.DataFrame, wm_col: Optional[str], current_max: Any
     ) -> Any:
-        """Track the highest watermark value in chunk"""
+        """Track the highest watermark value in chunk with type safety"""
         if not wm_col:
             return current_max
         
@@ -520,12 +541,42 @@ class NodeExecutor:
         try:
             new_max = chunk[actual_col].max()
             
+            # If chunk is empty or all null, max() might be NaN or None
+            if pd.isna(new_max):
+                return current_max
+
             # Convert Timestamp to datetime
             if hasattr(new_max, 'to_pydatetime'):
                 new_max = new_max.to_pydatetime()
             
-            if current_max is None or new_max > current_max:
+            if current_max is None:
                 return new_max
+
+            # Type-safe comparison
+            try:
+                # If new_max is numeric, ensure current_max is numeric
+                if isinstance(new_max, (int, float, np.integer, np.floating)):
+                    current_max_numeric = pd.to_numeric(current_max)
+                    if new_max > current_max_numeric:
+                        return new_max
+                
+                # If new_max is datetime, ensure current_max is datetime
+                elif isinstance(new_max, datetime):
+                    current_max_dt = pd.to_datetime(current_max)
+                    if current_max_dt.tzinfo is None and new_max.tzinfo is not None:
+                        current_max_dt = current_max_dt.replace(tzinfo=new_max.tzinfo)
+                    if new_max > current_max_dt:
+                        return new_max
+                
+                # Fallback to string comparison
+                elif str(new_max) > str(current_max):
+                    return new_max
+                    
+            except (ValueError, TypeError):
+                # If comparison fails, fallback to string comparison or just return current
+                logger.warning(f"Watermark comparison failed between {type(new_max)} and {type(current_max)}")
+                if str(new_max) > str(current_max):
+                    return new_max
             
             return current_max
         
@@ -536,7 +587,7 @@ class NodeExecutor:
     def _persist_watermark(
         self, pipeline_id: int, asset_id: int, wm_col: str, max_val: Any
     ):
-        """Persist watermark value to database"""
+        """Persist watermark value to database with type preservation"""
         from app.db.session import SessionLocal
         from app.models.execution import Watermark
         
@@ -554,14 +605,17 @@ class NodeExecutor:
                 )
                 session.add(t_wm)
             
-            # Format value
+            # Preserve numeric types for JSON storage, only convert dates/complex types to string
             if hasattr(max_val, 'isoformat'):
-                value_str = max_val.isoformat()
+                value = max_val.isoformat()
+            elif isinstance(max_val, (int, float, np.integer, np.floating)):
+                # Convert numpy types to native python types for JSON serialization
+                value = max_val.item() if hasattr(max_val, 'item') else max_val
             else:
-                value_str = str(max_val)
+                value = max_val
             
-            t_wm.last_value = {wm_col or "watermark": value_str}
+            t_wm.last_value = {wm_col or "watermark": value}
             t_wm.last_updated = datetime.now(timezone.utc)
             
             session.commit()
-            logger.debug(f"Watermark persisted: {wm_col}={value_str}")
+            logger.debug(f"Watermark persisted: {wm_col or 'watermark'}={value}")
