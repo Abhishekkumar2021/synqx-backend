@@ -11,3 +11,8 @@ wheels/
 
 # Environments
 .env
+
+# Data files
+data/
+logs/
+celerybeat-*
