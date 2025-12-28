@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import os
 import psutil
+import json
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
@@ -127,7 +128,8 @@ class NodeExecutor:
         
         DBLogger.log_step(
             db, step_run.id, "INFO",
-            f"Initializing task: {node.name} (Implementation: {node.operator_class})"
+            f"Initializing task: {node.name} (Implementation: {node.operator_class})",
+            job_id=pipeline_run.job_id
         )
         
         # Initialize forensics and statistics
@@ -169,7 +171,7 @@ class NodeExecutor:
                 
                 # Optional: Log progress every few chunks for very large datasets
                 if stats["chunks_out"] % 50 == 0:
-                    DBLogger.log_step(db, step_run.id, "INFO", f"Processing in progress: {stats['out']:,} records streamed...")
+                    DBLogger.log_step(db, step_run.id, "INFO", f"Processing in progress: {stats['out']:,} records streamed...", job_id=pipeline_run.job_id)
             else:
                 stats["in"] += chunk_rows
                 stats["chunks_in"] += 1
@@ -197,7 +199,8 @@ class NodeExecutor:
                 logger.info(f"  Source: {conn.connector_type.value.upper()} / {asset.name}")
                 DBLogger.log_step(
                     db, step_run.id, "INFO",
-                    f"Establishing connection to {conn.connector_type.value.upper()} source: '{asset.name}'"
+                    f"Establishing connection to {conn.connector_type.value.upper()} source: '{asset.name}'",
+                    job_id=pipeline_run.job_id
                 )
                 
                 # Get connector configuration
@@ -214,11 +217,14 @@ class NodeExecutor:
                         logger.info(f"  Incremental: Resuming from watermark={current_wm}")
                         DBLogger.log_step(
                             db, step_run.id, "INFO",
-                            f"Resuming incremental synchronization from offset: {current_wm}"
+                            f"Resuming incremental synchronization from offset: {current_wm}",
+                            job_id=pipeline_run.job_id
                         )
                 
                 # Prepare read parameters
-                read_params = {"asset": asset.name}
+                # Use fully_qualified_name as the primary identifier if available
+                asset_identifier = asset.fully_qualified_name or asset.name
+                read_params = {"asset": asset_identifier}
                 if asset.config:
                     read_params.update(asset.config)
                 if inc_filter:
@@ -260,7 +266,8 @@ class NodeExecutor:
                     logger.info(f"  ✓ New watermark persisted: {max_val}")
                     DBLogger.log_step(
                         db, step_run.id, "INFO",
-                        f"Synchronization cursor updated: {max_val}"
+                        f"Synchronization cursor updated: {max_val}",
+                        job_id=pipeline_run.job_id
                     )
             
             # =====================================================================
@@ -272,7 +279,8 @@ class NodeExecutor:
                 logger.info(f"  Target: {conn.connector_type.value.upper()} / {asset.name}")
                 DBLogger.log_step(
                     db, step_run.id, "INFO",
-                    f"Transmitting data to {conn.connector_type.value.upper()} target: '{asset.name}'"
+                    f"Transmitting data to {conn.connector_type.value.upper()} target: '{asset.name}'",
+                    job_id=pipeline_run.job_id
                 )
                 
                 # Get connector
@@ -289,13 +297,15 @@ class NodeExecutor:
                             yield chunk
                 
                 # Write data
-                write_mode = (asset.config or {}).get("write_mode", "append")
+                write_mode = node.config.get("write_strategy") or (asset.config or {}).get("write_mode") or "append"
+                asset_identifier = asset.fully_qualified_name or asset.name
                 logger.info(f"  Write mode: {write_mode.upper()}")
+                DBLogger.log_step(db, step_run.id, "INFO", f"Executing load using strategy: {write_mode.upper()}", job_id=pipeline_run.job_id)
                 
                 with connector.session() as session:
                     records_out = session.write_batch(
                         sink_stream(),
-                        asset=asset.name,
+                        asset=asset_identifier,
                         mode=write_mode
                     )
                     stats["out"] = records_out
@@ -332,7 +342,8 @@ class NodeExecutor:
                     logger.info(f"  Applying multi-input operation: {op_type.value.upper()}")
                     DBLogger.log_step(
                         db, step_run.id, "INFO",
-                        f"Executing multi-input operation: {op_type.value.upper()}"
+                        f"Executing multi-input operation: {op_type.value.upper()}",
+                        job_id=pipeline_run.job_id
                     )
                     
                     transform = TransformFactory.get_transform(node.operator_class, node.config)
@@ -350,7 +361,8 @@ class NodeExecutor:
                             logger.info(f"  Applying transform: {node.operator_class}")
                             DBLogger.log_step(
                                 db, step_run.id, "INFO",
-                                f"Applying transformation logic: {node.operator_class}"
+                                f"Applying transformation logic: {node.operator_class}",
+                                job_id=pipeline_run.job_id
                             )
                             transform = TransformFactory.get_transform(
                                 node.operator_class, node.config

@@ -166,6 +166,15 @@ class PipelineNode(Base, AuditMixin):
     def __repr__(self):
         return f"<PipelineNode(id={self.id}, name='{self.name}', type={self.operator_type})>"
 
+    @property
+    def connection_id(self) -> Optional[int]:
+        """Derive connection_id from associated assets"""
+        if self.source_asset:
+            return self.source_asset.connection_id
+        if self.destination_asset:
+            return self.destination_asset.connection_id
+        return None
+
 
 class PipelineEdge(Base, AuditMixin):
     __tablename__ = "pipeline_edges"

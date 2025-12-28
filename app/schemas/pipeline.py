@@ -15,6 +15,7 @@ class PipelineNodeBase(BaseModel):
     order_index: int = Field(..., ge=0)
     source_asset_id: Optional[int] = Field(None, gt=0)
     destination_asset_id: Optional[int] = Field(None, gt=0)
+    connection_id: Optional[int] = None
     max_retries: int = Field(default=3, ge=0, le=10)
     retry_strategy: RetryStrategy = Field(default=RetryStrategy.FIXED)
     retry_delay_seconds: int = Field(default=60, ge=0, le=3600)

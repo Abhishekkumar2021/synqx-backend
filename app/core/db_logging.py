@@ -59,7 +59,7 @@ class DBLogger:
             logger.error(f"Failed to write JobLog (Job {job_id}): {e}")
 
     @staticmethod
-    def log_step(session: Session, step_run_id: int, level: str, message: str, metadata: Optional[Dict[str, Any]] = None, source: str = "runner"):
+    def log_step(session: Session, step_run_id: int, level: str, message: str, metadata: Optional[Dict[str, Any]] = None, source: str = "runner", job_id: Optional[int] = None):
         """
         Writes a log entry to the step_logs table.
         """
@@ -93,17 +93,8 @@ class DBLogger:
             redis_client.publish(f"step:{step_run_id}", json.dumps(payload))
 
             # Publish to Job Redis channel (for unified view)
-            from app.models.execution import StepRun, PipelineRun
-            
-            result = (
-                session.query(PipelineRun.job_id)
-                .join(StepRun, StepRun.pipeline_run_id == PipelineRun.id)
-                .filter(StepRun.id == step_run_id)
-                .first()
-            )
-            
-            if result:
-                job_id = result.job_id
+            if job_id:
+                # Use provided job_id to avoid DB lookup
                 job_payload = {
                     "type": "step_log",
                     "id": log_id,
@@ -115,6 +106,30 @@ class DBLogger:
                     "job_id": job_id
                 }
                 redis_client.publish(f"job:{job_id}", json.dumps(job_payload))
+            else:
+                # Fallback to DB lookup if job_id not provided
+                from app.models.execution import StepRun, PipelineRun
+                
+                result = (
+                    session.query(PipelineRun.job_id)
+                    .join(StepRun, StepRun.pipeline_run_id == PipelineRun.id)
+                    .filter(StepRun.id == step_run_id)
+                    .first()
+                )
+                
+                if result:
+                    jid = result.job_id
+                    job_payload = {
+                        "type": "step_log",
+                        "id": log_id,
+                        "level": level.upper(),
+                        "message": message,
+                        "timestamp": timestamp.isoformat(),
+                        "source": source,
+                        "step_run_id": step_run_id,
+                        "job_id": jid
+                    }
+                    redis_client.publish(f"job:{jid}", json.dumps(job_payload))
             
         except Exception as e:
             logger.error(f"Failed to write StepLog (StepRun {step_run_id}): {e}")

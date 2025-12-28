@@ -597,8 +597,9 @@ class ConnectionService:
                 asset.connection.connector_type.value, config
             )
 
+            asset_identifier = asset.fully_qualified_name or asset.name
             with connector.session() as session:
-                schema = session.infer_schema(asset.name, sample_size=sample_size)
+                schema = session.infer_schema(asset_identifier, sample_size=sample_size)
 
             schema_json = json.dumps(schema, sort_keys=True)
             schema_hash = hashlib.sha256(schema_json.encode()).hexdigest()
@@ -665,8 +666,9 @@ class ConnectionService:
                 asset.connection.connector_type.value, config
             )
 
+            asset_identifier = asset.fully_qualified_name or asset.name
             with connector.session() as session:
-                rows = session.fetch_sample(asset.name, limit=limit)
+                rows = session.fetch_sample(asset_identifier, limit=limit)
 
             return {
                 "asset_id": asset_id,

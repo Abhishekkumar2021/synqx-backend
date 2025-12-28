@@ -94,12 +94,20 @@ class SQLConnector(BaseConnector):
                 all_assets = [t for t in all_assets if pattern.lower() in t.lower()]
 
             if not include_metadata:
-                return [{"name": t, "type": "table" if t in tables else "view"} for t in all_assets]
+                return [
+                    {
+                        "name": t, 
+                        "fully_qualified_name": f"{db_schema}.{t}" if db_schema else t,
+                        "type": "table" if t in tables else "view"
+                    } 
+                    for t in all_assets
+                ]
 
             results = []
             for asset in all_assets:
                 results.append({
                     "name": asset,
+                    "fully_qualified_name": f"{db_schema}.{asset}" if db_schema else asset,
                     "type": "table" if asset in tables else "view",
                     "schema": db_schema,
                     "row_count": self._get_row_count(asset, db_schema),
@@ -258,6 +266,10 @@ class SQLConnector(BaseConnector):
         self.connect()
         schema = self.config.get("db_schema") or self.config.get("schema")
         
+        # Normalize mode
+        clean_mode = mode.lower()
+        if clean_mode == "replace": clean_mode = "overwrite"
+
         # Discover target columns to prevent errors from extra columns (e.g. joined results)
         try:
             inspector = inspect(self._engine)
@@ -273,6 +285,7 @@ class SQLConnector(BaseConnector):
             
         total = 0
         try:
+            first_chunk = True
             for df in data_iter:
                 if df is None or df.empty: 
                     continue
@@ -290,15 +303,24 @@ class SQLConnector(BaseConnector):
                     if df[col].dtype == 'object':
                         df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
                 
+                # Handle Write Mode
+                if_exists_val = 'append'
+                if first_chunk and clean_mode == 'overwrite':
+                    if_exists_val = 'replace'
+                
+                if clean_mode == 'upsert':
+                    logger.warning(f"Upsert requested for {asset} but generic SQLConnector only supports append/overwrite. Falling back to append.")
+
                 df.to_sql(
                     name=asset,
                     schema=schema,
                     con=self._connection,
-                    if_exists='replace' if mode == 'replace' and total == 0 else 'append',
+                    if_exists=if_exists_val,
                     index=False,
                     **kwargs
                 )
                 total += len(df)
+                first_chunk = False
             return total
         except Exception as e:
             raise DataTransferError(f"Write failed for {asset}: {e}")

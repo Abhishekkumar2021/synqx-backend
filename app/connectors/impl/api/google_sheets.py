@@ -92,6 +92,7 @@ class GoogleSheetsConnector(BaseConnector):
                 
                 assets.append({
                     "name": name,
+                    "fully_qualified_name": f"{self.spreadsheet_id}.{name}",
                     "asset_type": "sheet",
                     "metadata": sheet['properties'] if include_metadata else {}
                 })

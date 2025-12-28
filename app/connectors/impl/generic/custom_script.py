@@ -209,9 +209,9 @@ class CustomScriptConnector(BaseConnector):
                 
                 asset_info = {
                     "name": entry.name,
+                    "fully_qualified_name": entry.path,
                     "asset_type": "script",
-                    "type": type_map.get(ext, "unknown"),
-                    "path": entry.path
+                    "type": type_map.get(ext, "unknown")
                 }
                 
                 if include_metadata:
@@ -330,6 +330,10 @@ class CustomScriptConnector(BaseConnector):
         else:
              raise ConfigurationError(f"Unsupported language for writing: {language}")
 
+        # Normalize mode
+        clean_mode = mode.lower()
+        if clean_mode == "replace": clean_mode = "overwrite"
+
         is_file = os.path.exists(code) and os.path.isfile(code)
         script_path = code if is_file else None
         
@@ -345,7 +349,7 @@ class CustomScriptConnector(BaseConnector):
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env={**os.environ, **self.env_vars, "SYNQX_MODE": "write"},
+                env={**os.environ, **self.env_vars, "SYNQX_MODE": "write", "SYNQX_WRITE_STRATEGY": clean_mode},
                 text=True
             )
 

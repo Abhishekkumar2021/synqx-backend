@@ -44,13 +44,26 @@ class JoinTransform(BaseTransform):
         left_iter = data_map[left_id]
         
         for df in left_iter:
+            if df.empty:
+                yield df
+                continue
+
             if join_on not in df.columns:
-                yield df if how == "left" else pd.DataFrame()
+                logger.warning(f"Join column '{join_on}' not found in left input '{left_id}'. Available: {df.columns.tolist()}")
+                yield df if how == "left" else pd.DataFrame(columns=df.columns)
                 continue
             
+            if not right_df.empty and join_on not in right_df.columns:
+                raise ConfigurationError(f"Join column '{join_on}' not found in right input '{right_id}'. Available: {right_df.columns.tolist()}")
+
             try:
                 # Provide suffixes to avoid collision if column names overlap
-                merged = pd.merge(df, right_df, on=join_on, how=how, suffixes=('_left', '_right'))
+                if right_df.empty:
+                    # For left join with empty right, just return left with suffixes or as is
+                    # For simplicity and correctness with pd.merge behavior:
+                    merged = pd.merge(df, pd.DataFrame(columns=[join_on]), on=join_on, how=how, suffixes=('_left', '_right'))
+                else:
+                    merged = pd.merge(df, right_df, on=join_on, how=how, suffixes=('_left', '_right'))
                 yield merged
             except Exception as e:
                  raise ConfigurationError(f"Join operation failed: {e}")

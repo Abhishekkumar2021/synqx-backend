@@ -152,8 +152,8 @@ class RestApiConnector(BaseConnector):
                 
                 asset = {
                     "name": ep['name'],
+                    "fully_qualified_name": ep['path'],
                     "asset_type": "endpoint",
-                    "path": ep['path'],
                 }
                 if include_metadata:
                     asset["metadata"] = {
@@ -164,7 +164,7 @@ class RestApiConnector(BaseConnector):
                 assets.append(asset)
         
         if not assets and not pattern:
-            assets.append({"name": "root", "asset_type": "endpoint", "path": "/"})
+            assets.append({"name": "root", "fully_qualified_name": "/", "asset_type": "endpoint"})
             
         return assets
 
@@ -176,18 +176,24 @@ class RestApiConnector(BaseConnector):
         try:
             path = self._get_path(asset)
             
+            # Allow asset-level overrides
+            pagination_type = kwargs.get("pagination_type") or self._config_model.pagination_type
+            limit_param = kwargs.get("limit_param") or self._config_model.limit_param
+            page_size_param = kwargs.get("page_size_param") or self._config_model.page_size_param
+            data_key = kwargs.get("data_key") or self._config_model.data_key
+
             # Use pagination params for sampling
             params = {}
-            if self._config_model.pagination_type == "limit_offset":
-                params[self._config_model.limit_param] = sample_size
-            elif self._config_model.pagination_type == "page_number":
-                params[self._config_model.page_size_param] = sample_size
+            if pagination_type == "limit_offset":
+                params[limit_param] = sample_size
+            elif pagination_type == "page_number":
+                params[page_size_param] = sample_size
 
             res = self.client.get(path, params=params)
             res.raise_for_status()
             
             data = res.json()
-            records = self._extract_records(data)
+            records = self._extract_records(data, override_data_key=data_key)
             
             if not records:
                 return {
@@ -206,7 +212,7 @@ class RestApiConnector(BaseConnector):
                         "name": str(col), 
                         "type": self._map_dtype(dtype), 
                         "native_type": str(dtype),
-                        "nullable": df[col].isnull().any()
+                        "nullable": bool(df[col].isnull().any())
                     } 
                     for col, dtype in df.dtypes.items()
                 ]
@@ -237,6 +243,15 @@ class RestApiConnector(BaseConnector):
         # Initial Params
         base_params = kwargs.get("params", {}).copy()
         
+        # Allow asset-level overrides
+        data_key = kwargs.get("data_key") or self._config_model.data_key
+        pagination_type = kwargs.get("pagination_type") or self._config_model.pagination_type
+        limit_param = kwargs.get("limit_param") or self._config_model.limit_param
+        offset_param = kwargs.get("offset_param") or self._config_model.offset_param
+        page_param = kwargs.get("page_param") or self._config_model.page_param
+        page_size_param = kwargs.get("page_size_param") or self._config_model.page_size_param
+        page_size = int(kwargs.get("page_size") or self._config_model.page_size)
+
         current_offset = offset or 0
         current_page = 1
         total_fetched = 0
@@ -245,19 +260,19 @@ class RestApiConnector(BaseConnector):
             params = base_params.copy()
             
             # Apply Pagination
-            if self._config_model.pagination_type == "limit_offset":
-                params[self._config_model.limit_param] = self._config_model.page_size
-                params[self._config_model.offset_param] = current_offset
-            elif self._config_model.pagination_type == "page_number":
-                params[self._config_model.page_param] = current_page
-                params[self._config_model.page_size_param] = self._config_model.page_size
+            if pagination_type == "limit_offset":
+                params[limit_param] = page_size
+                params[offset_param] = current_offset
+            elif pagination_type == "page_number":
+                params[page_param] = current_page
+                params[page_size_param] = page_size
 
             try:
                 res = self.client.get(path, params=params)
                 res.raise_for_status()
                 data = res.json()
                 
-                records = self._extract_records(data)
+                records = self._extract_records(data, override_data_key=data_key)
                 if not records:
                     break
                 
@@ -268,7 +283,14 @@ class RestApiConnector(BaseConnector):
                 if inc_filter and isinstance(inc_filter, dict):
                     for col, val in inc_filter.items():
                         if col in df.columns:
-                            df = df[df[col] > val]
+                            # Robust comparison for different types
+                            series = df[col]
+                            if pd.api.types.is_numeric_dtype(series):
+                                df = df[series > float(val)]
+                            elif pd.api.types.is_datetime64_any_dtype(series):
+                                df = df[pd.to_datetime(series) > pd.to_datetime(val)]
+                            else:
+                                df = df[series.astype(str) > str(val)]
 
                 if not df.empty:
                     # Respect global limit if provided
@@ -281,11 +303,11 @@ class RestApiConnector(BaseConnector):
                     total_fetched += len(df)
 
                 # Check if we should continue paginating
-                if self._config_model.pagination_type == "none" or (limit and total_fetched >= limit):
+                if pagination_type == "none" or (limit and total_fetched >= limit):
                     break
                 
                 # Update counters for next iteration
-                if len(records) < self._config_model.page_size:
+                if len(records) < page_size:
                     break # Last page reached
                     
                 current_offset += len(records)
@@ -305,19 +327,36 @@ class RestApiConnector(BaseConnector):
         path = self._get_path(asset)
         total = 0
         
+        # Normalize mode
+        clean_mode = mode.lower()
+        if clean_mode == "replace": clean_mode = "overwrite"
+
         data_iter = [data] if isinstance(data, pd.DataFrame) else data
-        method = self._config_model.write_method.upper()
+        
+        # Allow asset-level overrides
+        method = (kwargs.get("write_method") or self._config_model.write_method).upper()
+        batch_size = int(kwargs.get("batch_size") or self._config_model.batch_size)
+        batch_key = kwargs.get("batch_key") or self._config_model.batch_key
+
+        # If upsert is requested and we are doing record-by-record, 
+        # we might want to default to PUT/PATCH if method is POST
+        if clean_mode == "upsert" and method == "POST":
+            # Heuristic: Upsert on REST often means PUT
+            method = "PUT"
+            logger.info(f"REST Upsert requested: defaulting method to {method}")
+
+        logger.info(f"Executing REST load using method {method} (Strategy: {clean_mode})")
 
         for df in data_iter:
             records = df.where(pd.notnull(df), None).to_dict(orient="records")
             
-            if self._config_model.batch_size > 1:
+            if batch_size > 1:
                 # Batch Writing
-                for i in range(0, len(records), self._config_model.batch_size):
-                    chunk = records[i : i + self._config_model.batch_size]
+                for i in range(0, len(records), batch_size):
+                    chunk = records[i : i + batch_size]
                     payload = chunk
-                    if self._config_model.batch_key:
-                        payload = {self._config_model.batch_key: chunk}
+                    if batch_key:
+                        payload = {batch_key: chunk}
                     
                     try:
                         res = self.client.request(method, path, json=payload)
@@ -374,7 +413,7 @@ class RestApiConnector(BaseConnector):
                     return ep['path']
         return asset if asset.startswith("/") else f"/{asset}"
 
-    def _extract_records(self, data: Any) -> List[Dict[str, Any]]:
+    def _extract_records(self, data: Any, override_data_key: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Flexible record extraction from JSON response.
         Supports custom data_key with dot-notation.
@@ -383,8 +422,9 @@ class RestApiConnector(BaseConnector):
             return []
 
         target = data
-        if self._config_model.data_key:
-            for part in self._config_model.data_key.split('.'):
+        data_key = override_data_key or self._config_model.data_key
+        if data_key:
+            for part in data_key.split('.'):
                 if isinstance(target, dict) and part in target:
                     target = target[part]
                 else:

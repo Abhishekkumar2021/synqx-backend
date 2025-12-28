@@ -79,21 +79,24 @@ class S3Connector(BaseConnector):
             assets = []
             for f in files:
                 if f.endswith(valid_extensions):
-                    name = f.replace(f"{self._config_model.bucket}/", "")
-                    if pattern and pattern.lower() not in name.lower():
+                    rel_path = f.replace(f"{self._config_model.bucket}/", "")
+                    if pattern and pattern.lower() not in rel_path.lower():
                         continue
                     
-                    if not include_metadata:
-                        assets.append({"name": name, "type": "file"})
-                    else:
+                    asset = {
+                        "name": os.path.basename(rel_path),
+                        "fully_qualified_name": rel_path,
+                        "type": "file"
+                    }
+                    
+                    if include_metadata:
                         info = self._fs.info(f)
-                        assets.append({
-                            "name": name,
-                            "type": "file",
+                        asset["metadata"] = {
                             "size_bytes": info.get('size'),
                             "last_modified": str(info.get('LastModified')),
-                            "format": name.split('.')[-1]
-                        })
+                            "format": rel_path.split('.')[-1]
+                        }
+                    assets.append(asset)
             return assets
         except Exception as e:
             raise DataTransferError(f"Failed to discover S3 assets: {e}")

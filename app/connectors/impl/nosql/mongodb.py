@@ -95,20 +95,33 @@ class MongoDBConnector(BaseConnector):
                 collections = [c for c in collections if pattern.lower() in c.lower()]
 
             if not include_metadata:
-                return [{"name": c, "type": "collection"} for c in collections]
+                return [
+                    {
+                        "name": c, 
+                        "fully_qualified_name": f"{self._config_model.database}.{c}",
+                        "type": "collection"
+                    } 
+                    for c in collections
+                ]
 
             enriched = []
             for col_name in collections:
+                fqn = f"{self._config_model.database}.{col_name}"
                 try:
                     stats = self._db.command("collstats", col_name)
                     enriched.append({
                         "name": col_name,
+                        "fully_qualified_name": fqn,
                         "type": "collection",
                         "row_count": stats.get('count', 0),
                         "size_bytes": stats.get('size', 0),
                     })
                 except Exception:
-                    enriched.append({"name": col_name, "type": "collection"})
+                    enriched.append({
+                        "name": col_name, 
+                        "fully_qualified_name": fqn,
+                        "type": "collection"
+                    })
             return enriched
         except Exception as e:
             raise DataTransferError(f"Failed to discover MongoDB collections: {e}")
@@ -228,7 +241,11 @@ class MongoDBConnector(BaseConnector):
         self.connect()
         collection = self._db[asset]
         
-        if mode == "replace":
+        # Normalize mode
+        clean_mode = mode.lower()
+        if clean_mode == "replace": clean_mode = "overwrite"
+
+        if clean_mode == "overwrite":
              collection.drop()
              
         if isinstance(data, pd.DataFrame):
@@ -241,10 +258,22 @@ class MongoDBConnector(BaseConnector):
             for df in data_iter:
                 if df.empty: continue
                 records = df.to_dict(orient="records")
-                # MongoDB doesn't like '.' in keys, but pandas might have them. 
-                # Production would sanitize here.
-                result = collection.insert_many(records)
-                total += len(result.inserted_ids)
+                
+                if clean_mode == "upsert":
+                    # Get primary key for upsert logic
+                    pk = kwargs.get("primary_key") or self.config.get("primary_key") or "_id"
+                    for record in records:
+                        if pk in record:
+                            collection.update_one({pk: record[pk]}, {"$set": record}, upsert=True)
+                            total += 1
+                        else:
+                            # Fallback to insert if PK missing in record
+                            collection.insert_one(record)
+                            total += 1
+                else:
+                    # Default append
+                    result = collection.insert_many(records)
+                    total += len(result.inserted_ids)
             return total
         except Exception as e:
             raise DataTransferError(f"MongoDB write failed: {e}")

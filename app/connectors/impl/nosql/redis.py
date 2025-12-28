@@ -58,11 +58,13 @@ class RedisConnector(BaseConnector):
         self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
     ) -> List[Dict[str, Any]]:
         self.connect()
-        # Redis is K-V, no real "tables". We can treat keyspaces or patterns as assets?
-        # For simplicity, we'll return a single "keyspace" asset or maybe specific patterns if requested.
-        # But commonly, Redis ETL involves specific key patterns.
-        # Let's return a wildcard asset.
-        return [{"name": "*", "type": "key_pattern"}]
+        # Redis is K-V, no real "tables". We can treat keyspaces or patterns as assets.
+        # Standardize name and fully_qualified_name.
+        return [{
+            "name": pattern or "all_keys", 
+            "fully_qualified_name": pattern or "*",
+            "type": "key_pattern"
+        }]
 
     def infer_schema(self, asset: str, **kwargs) -> Dict[str, Any]:
         return {
@@ -139,6 +141,20 @@ class RedisConnector(BaseConnector):
         self.connect()
         total = 0
         
+        # Normalize mode
+        clean_mode = mode.lower()
+        if clean_mode == "replace": clean_mode = "overwrite"
+
+        if clean_mode == "overwrite":
+            # Warning: This clears the entire Redis database. 
+            # In a multi-tenant system, we might want to clear only keys matching a prefix.
+            self._client.flushdb()
+            logger.info("redis_db_flushed_for_overwrite")
+
+        if clean_mode == "upsert":
+            # Redis mset naturally behaves as an upsert (overwrites existing keys)
+            pass
+            
         if isinstance(data, pd.DataFrame):
             iterator = [data]
         else:
@@ -149,7 +165,6 @@ class RedisConnector(BaseConnector):
                 continue # Skip invalid
             
             # Use pipeline
-            pipe = self._client.pipeline()
             mapping = dict(zip(df['key'], df['value']))
             if mapping:
                 try:

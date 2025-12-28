@@ -63,11 +63,16 @@ class LocalFileConnector(BaseConnector):
                 if os.path.isfile(f):
                     rel_path = os.path.relpath(f, base)
                     if not include_metadata:
-                        files.append({"name": rel_path, "type": "file"})
+                        files.append({
+                            "name": os.path.basename(f), 
+                            "fully_qualified_name": rel_path,
+                            "type": "file"
+                        })
                     else:
                         stat = os.stat(f)
                         files.append({
-                            "name": rel_path,
+                            "name": os.path.basename(f),
+                            "fully_qualified_name": rel_path,
                             "type": "file",
                             "size_bytes": stat.st_size,
                             "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
@@ -150,6 +155,10 @@ class LocalFileConnector(BaseConnector):
         path = self._get_full_path(asset)
         fmt = asset.split('.')[-1].lower()
         
+        # Normalize mode
+        clean_mode = mode.lower()
+        if clean_mode == "replace": clean_mode = "overwrite"
+        
         # Ensure parent directory exists before writing
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -164,14 +173,16 @@ class LocalFileConnector(BaseConnector):
             for df in data_iter:
                 if df.empty: continue
                 
-                write_mode = 'w' if (first and mode == 'replace') or not os.path.exists(path) else 'a'
+                if clean_mode == "upsert":
+                    logger.warning(f"Upsert requested for file {asset} but not supported. Falling back to append.")
+
+                write_mode = 'w' if (first and clean_mode == 'overwrite') or not os.path.exists(path) else 'a'
                 header = True if write_mode == 'w' or not os.path.exists(path) else False
                 
                 if fmt == 'csv':
                     df.to_csv(path, index=False, mode=write_mode, header=header)
                 elif fmt == 'parquet':
                     # Parquet doesn't support 'a' mode directly in to_parquet
-                    # Real systems would use fastparquet or pyarrow.dataset
                     df.to_parquet(path, index=False)
                 elif fmt in ('json', 'jsonl'):
                     df.to_json(path, orient='records', lines=(fmt == 'jsonl'), mode=write_mode)
