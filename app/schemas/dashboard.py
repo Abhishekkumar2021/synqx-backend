@@ -25,18 +25,53 @@ class RecentActivity(BaseModel):
     duration_seconds: Optional[float]
     user_avatar: Optional[str] = None # Placeholder for frontend compatibility
 
+class SystemHealth(BaseModel):
+    cpu_percent: float
+    memory_usage_mb: float
+    active_workers: int
+
+class FailingPipeline(BaseModel):
+    id: int
+    name: str
+    failure_count: int
+
+class SlowestPipeline(BaseModel):
+    id: int
+    name: str
+    avg_duration: float
+
+class DashboardAlert(BaseModel):
+    id: int
+    message: str
+    level: str
+    created_at: datetime
+    pipeline_id: Optional[int] = None
+
+class ConnectorHealth(BaseModel):
+    status: str
+    count: int
+
 class DashboardStats(BaseModel):
     total_pipelines: int
     active_pipelines: int
-    total_jobs_24h: int
-    success_rate_24h: float
-    avg_duration_24h: float
     total_connections: int
-    total_rows_24h: int = 0
-    total_bytes_24h: int = 0
+    connector_health: List[ConnectorHealth] = []
+    
+    # Period stats
+    total_jobs: int
+    success_rate: float
+    avg_duration: float
+    total_rows: int = 0
+    total_bytes: int = 0
     
     throughput: List[ThroughputDataPoint]
     pipeline_distribution: List[PipelineDistribution]
     recent_activity: List[RecentActivity]
+
+    # New Metrics
+    system_health: Optional[SystemHealth] = None
+    top_failing_pipelines: List[FailingPipeline] = []
+    slowest_pipelines: List[SlowestPipeline] = []
+    recent_alerts: List[DashboardAlert] = []
 
     model_config = ConfigDict(from_attributes=True)

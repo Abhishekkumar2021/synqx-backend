@@ -188,9 +188,9 @@ class PipelineRunContext(Base, AuditMixin):
         ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False, unique=True, index=True,
     )
 
-    context: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    parameters: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    environment: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    context: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
+    parameters: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
+    environment: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict, server_default='{}')
 
     pipeline_run: Mapped["PipelineRun"] = relationship("PipelineRun", back_populates="context")
 

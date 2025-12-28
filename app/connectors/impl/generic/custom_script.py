@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Iterator, Set
+from typing import Any, Dict, List, Optional, Iterator, Set, Union
 import pandas as pd
 import numpy as np
 import subprocess
@@ -163,8 +163,6 @@ class CustomScriptConnector(BaseConnector):
             if self.config.get("code"):
                 lang = self.config.get("language")
                 if lang == "python":
-                    # If isolated, we can't easily check imports statically against that environment without running code.
-                    # Skipping deep check for isolated mode in test_connection for simplicity
                     if "python_executable" not in self.execution_context:
                         missing = self._check_python_dependencies(self.config["code"])
                         if missing:
@@ -201,7 +199,7 @@ class CustomScriptConnector(BaseConnector):
         for entry in os.scandir(self.base_path):
             valid_exts = [".py", ".sh", ".js"]
             if entry.is_file() and any(entry.name.endswith(ext) for ext in valid_exts):
-                if pattern and pattern not in entry.name:
+                if pattern and pattern.lower() not in entry.name.lower():
                     continue
                 
                 type_map = {
@@ -211,13 +209,18 @@ class CustomScriptConnector(BaseConnector):
                 
                 asset_info = {
                     "name": entry.name,
+                    "asset_type": "script",
                     "type": type_map.get(ext, "unknown"),
                     "path": entry.path
                 }
                 
                 if include_metadata:
-                    asset_info["size"] = entry.stat().st_size
-                    asset_info["last_modified"] = entry.stat().st_mtime
+                    stat = entry.stat()
+                    asset_info["metadata"] = {
+                        "size": stat.st_size,
+                        "last_modified": stat.st_mtime,
+                        "executable": os.access(entry.path, os.X_OK)
+                    }
                     
                 assets.append(asset_info)
         return assets
@@ -229,11 +232,31 @@ class CustomScriptConnector(BaseConnector):
         **kwargs
     ) -> Dict[str, Any]:
         try:
-            df = next(self.read_batch(asset, limit=10, **kwargs))
-            columns = [{"name": col, "type": str(dtype)} for col, dtype in df.dtypes.items()]
-            return {"asset": asset, "columns": columns}
+            # We try to get a small sample to infer schema
+            df_iter = self.read_batch(asset, limit=10, **kwargs)
+            try:
+                df = next(df_iter)
+            except StopIteration:
+                return {"asset": asset, "columns": [], "message": "No data returned by script"}
+
+            return {
+                "asset": asset,
+                "columns": [
+                    {"name": str(col), "type": self._map_dtype(dtype), "native_type": str(dtype)} 
+                    for col, dtype in df.dtypes.items()
+                ],
+                "sample_count": len(df)
+            }
         except Exception as e:
             raise SchemaDiscoveryError(f"Failed to infer schema for script '{asset}': {e}")
+
+    def _map_dtype(self, dtype: Any) -> str:
+        s = str(dtype).lower()
+        if "int" in s: return "integer"
+        if "float" in s or "double" in s: return "float"
+        if "bool" in s: return "boolean"
+        if "datetime" in s: return "datetime"
+        return "string"
 
     def read_batch(
         self,
@@ -243,8 +266,8 @@ class CustomScriptConnector(BaseConnector):
         **kwargs
     ) -> Iterator[pd.DataFrame]:
         
-        code = kwargs.get("code") or kwargs.get("query")
-        language = kwargs.get("language", "python")
+        code = kwargs.get("code") or self.config.get("code")
+        language = kwargs.get("language") or self.config.get("language", "python")
         
         if not code:
             possible_path = os.path.join(self.base_path, asset)
@@ -252,15 +275,13 @@ class CustomScriptConnector(BaseConnector):
                 if possible_path.endswith(".py"): language = "python"
                 elif possible_path.endswith(".sh"): language = "shell"
                 elif possible_path.endswith(".js"): language = "javascript"
-                
-                if language in ["python", "shell", "javascript"]:
-                     code = possible_path
+                code = possible_path
             else:
-                raise DataTransferError(f"No code provided for asset '{asset}' and file not found.")
+                raise DataTransferError(f"No code provided and file not found: {asset}")
 
         incremental_filter = kwargs.get("incremental_filter")
         
-        # Clean up kwargs to avoid multiple values for arguments
+        # Clean up kwargs
         exec_kwargs = kwargs.copy()
         for key in ["code", "query", "language", "incremental_filter"]:
             exec_kwargs.pop(key, None)
@@ -273,6 +294,95 @@ class CustomScriptConnector(BaseConnector):
             yield from self._execute_javascript(asset, code, limit, offset, incremental_filter=incremental_filter, **exec_kwargs)
         else:
             raise ConfigurationError(f"Unsupported script language: {language}")
+
+    def write_batch(
+        self, 
+        data: Union[pd.DataFrame, Iterator[pd.DataFrame]], 
+        asset: str, 
+        mode: str = "append", 
+        **kwargs
+    ) -> int:
+        """
+        Writes data by piping it to a script as JSON lines via STDIN.
+        """
+        code = kwargs.get("code") or self.config.get("code")
+        language = kwargs.get("language") or self.config.get("language", "python")
+        
+        if not code:
+             possible_path = os.path.join(self.base_path, asset)
+             if os.path.exists(possible_path):
+                 code = possible_path
+             else:
+                 raise DataTransferError(f"No code provided for writing and file not found: {asset}")
+
+        total_written = 0
+        data_iter = [data] if isinstance(data, pd.DataFrame) else data
+
+        # For writing, we'll use a subprocess approach regardless of language
+        # because it's the safest way to pipe large amounts of data to a script.
+        
+        if language == "python":
+             cmd = [sys.executable] if "python_executable" not in self.execution_context else [self.execution_context["python_executable"]]
+        elif language == "shell":
+             cmd = ["bash"]
+        elif language == "javascript":
+             cmd = ["node"]
+        else:
+             raise ConfigurationError(f"Unsupported language for writing: {language}")
+
+        is_file = os.path.exists(code) and os.path.isfile(code)
+        script_path = code if is_file else None
+        
+        try:
+            if not is_file:
+                ext = ".py" if language == "python" else (".js" if language == "javascript" else ".sh")
+                with tempfile.NamedTemporaryFile(mode='w', suffix=ext, delete=False) as tf:
+                    tf.write(code)
+                    script_path = tf.name
+            
+            process = subprocess.Popen(
+                cmd + [script_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={**os.environ, **self.env_vars, "SYNQX_MODE": "write"},
+                text=True
+            )
+
+            for df in data_iter:
+                # Convert NaN to None for JSON
+                records = df.where(pd.notnull(df), None).to_dict(orient="records")
+                for record in records:
+                    process.stdin.write(json.dumps(record) + "\n")
+                    total_written += 1
+                process.stdin.flush()
+
+            process.stdin.close()
+            process.wait()
+
+            if process.returncode != 0:
+                stderr = process.stderr.read()
+                raise DataTransferError(f"Write script failed (Exit {process.returncode}): {stderr}")
+            
+            return total_written
+
+        except Exception as e:
+            raise DataTransferError(f"Failed to execute write script: {e}")
+        finally:
+            if script_path and not is_file and os.path.exists(script_path):
+                os.remove(script_path)
+
+    def get_sample_code(self, language: str, mode: str = "read") -> str:
+        """Returns template code for scripts."""
+        if mode == "read":
+            if language == "python":
+                return "import pandas as pd\nimport json\n\ndef extract(limit=None, offset=None):\n    # Your logic here\n    data = [{'id': 1, 'name': 'Sample'}]\n    return pd.DataFrame(data)"
+            elif language == "shell":
+                return "#!/bin/bash\necho '{\"id\": 1, \"name\": \"Sample\"}'"
+        else: # write
+             if language == "python":
+                return "import sys\nimport json\n\nfor line in sys.stdin:\n    record = json.loads(line)\n    # Process record"
+        return ""
 
     def _execute_python(self, asset_name: str, code: str, limit: int, offset: int, incremental_filter: Optional[Dict] = None, **kwargs) -> Iterator[pd.DataFrame]:
         """
@@ -554,6 +664,3 @@ class CustomScriptConnector(BaseConnector):
             return results[:limit] if limit else results
         except Exception as e:
             raise DataTransferError(f"Script query execution failed: {e}")
-
-    def write_batch(self, data, asset, **kwargs) -> int:
-        raise NotImplementedError("Writing not supported for scripts yet.")

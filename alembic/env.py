@@ -43,11 +43,22 @@ def run_migrations_offline() -> None:
 
     """
     url = config.get_main_option("sqlalchemy.url")
+    
+    # Read excluded tables from alembic.ini
+    exclude_tables = config.get_main_option("exclude_tables", "").split(",")
+
+    def include_object(object, name, type_, reflected, compare_to):
+        if type_ == "table" and name in exclude_tables:
+            return False
+        return True
+
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        compare_server_default=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -67,9 +78,20 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
+    # Read excluded tables from alembic.ini
+    exclude_tables = config.get_main_option("exclude_tables", "").split(",")
+
+    def include_object(object, name, type_, reflected, compare_to):
+        if type_ == "table" and name in exclude_tables:
+            return False
+        return True
+
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection, 
+            target_metadata=target_metadata,
+            compare_server_default=True,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

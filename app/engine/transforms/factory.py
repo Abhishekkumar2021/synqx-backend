@@ -16,9 +16,16 @@ class TransformFactory:
 
     @classmethod
     def get_transform(cls, transform_type: str, config: Dict[str, Any]) -> BaseTransform:
+        # Auto-discover if registry is empty (resiliency for worker processes)
+        if not cls._registry:
+            try:
+                import app.engine.transforms.impl
+            except ImportError:
+                pass
+
         transform_class = cls._registry.get(transform_type.lower())
         if not transform_class:
-            raise ConfigurationError(f"Transform type '{transform_type}' not registered.")
+            raise ConfigurationError(f"Transform type '{transform_type}' not registered. Available: {list(cls._registry.keys())}")
         
         try:
             return transform_class(config)

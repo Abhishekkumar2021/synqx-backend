@@ -24,23 +24,16 @@ class ConnectorFactory:
 
     @classmethod
     def get_connector(cls, connector_type: str, config: Dict[str, Any]) -> BaseConnector:
-        """
-        Retrieves and instantiates a connector based on its type and configuration.
+        # Auto-discover if registry is empty
+        if not cls._registry:
+            try:
+                import app.connectors.impl
+            except ImportError:
+                pass
 
-        Args:
-            connector_type: The string identifier of the connector to retrieve.
-            config: The configuration dictionary for the connector.
-
-        Returns:
-            An instance of the specified BaseConnector.
-
-        Raises:
-            ConfigurationError: If the connector type is not registered or
-                                if the configuration is invalid for the connector.
-        """
         connector_class = cls._registry.get(connector_type.lower())
         if not connector_class:
-            raise ConfigurationError(f"Connector type '{connector_type}' not registered.")
+            raise ConfigurationError(f"Connector type '{connector_type}' not registered. Available: {list(cls._registry.keys())}")
         
         try:
             return connector_class(config)

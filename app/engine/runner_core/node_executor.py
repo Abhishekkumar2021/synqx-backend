@@ -359,12 +359,12 @@ class NodeExecutor:
                         
                         except Exception as e:
                             logger.warning(
-                                f"  Transform '{node.operator_class}' not found, "
+                                f"  Transform '{node.operator_class}' not found or failed to initialize, "
                                 f"using pass-through: {e}"
                             )
                             DBLogger.log_step(
                                 db, step_run.id, "WARNING",
-                                f"Transformation '{node.operator_class}' not found, utilizing pass-through mode"
+                                f"Transformation '{node.operator_class}' failed to initialize (using pass-through): {str(e)}"
                             )
                             data_iter = upstream_it
                 

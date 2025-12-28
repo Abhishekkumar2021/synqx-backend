@@ -28,11 +28,12 @@ class RestApiConfig(BaseSettings):
     default_params: Dict[str, str] = Field(default_factory=dict, description="Default query parameters")
     timeout: float = Field(30.0, description="Request timeout in seconds")
     max_retries: int = Field(3, description="Maximum number of retries for failed requests")
+    verify_ssl: bool = Field(True, description="Verify SSL certificates")
     
     # Discovery/Assets
     endpoints: List[Dict[str, str]] = Field(
         default_factory=list, 
-        description="List of pre-configured endpoints. Format: [{'name': 'users', 'path': '/users'}]"
+        description="List of pre-configured endpoints. Format: [{'name': 'users', 'path': '/users', 'methods': ['GET', 'POST']}]"
     )
     
     # Data Extraction
@@ -47,6 +48,11 @@ class RestApiConfig(BaseSettings):
     page_param: str = Field("page", description="Param name for page number")
     page_size_param: str = Field("page_size", description="Param name for page size")
     page_size: int = Field(100, description="Default page size")
+    
+    # Write Config
+    write_method: str = Field("POST", description="HTTP method for writing data (POST, PUT, PATCH)")
+    batch_size: int = Field(1, description="Number of records to send in a single request (if API supports batching)")
+    batch_key: Optional[str] = Field(None, description="Key to wrap batch data in (e.g. 'records')")
 
 class RestApiConnector(BaseConnector):
     """
@@ -95,6 +101,7 @@ class RestApiConnector(BaseConnector):
             auth=auth,
             timeout=self._config_model.timeout,
             follow_redirects=True,
+            verify=self._config_model.verify_ssl,
             transport=httpx.HTTPTransport(retries=self._config_model.max_retries)
         )
 
@@ -104,12 +111,29 @@ class RestApiConnector(BaseConnector):
             self.client = None
 
     def test_connection(self) -> bool:
+        """
+        Tests connection by performing a lightweight request.
+        Tries configured endpoints first, then falls back to root.
+        """
         try:
             self.connect()
-            # If endpoints are configured, test the first one, otherwise test root
-            test_path = self._config_model.endpoints[0]['path'] if self._config_model.endpoints else "/"
-            res = self.client.get(test_path)
-            return res.status_code < 400
+            
+            # Try to find a 'safe' endpoint to test
+            test_paths = []
+            if self._config_model.endpoints:
+                test_paths.extend([ep['path'] for ep in self._config_model.endpoints[:2]])
+            test_paths.append("/")
+
+            for path in test_paths:
+                try:
+                    # Use HEAD if possible, fallback to GET with small limit
+                    res = self.client.get(path, params={self._config_model.limit_param: 1})
+                    if res.status_code < 400:
+                        return True
+                except Exception:
+                    continue
+            
+            return False
         except Exception as e:
             logger.error(f"REST Connection test failed: {e}")
             return False
@@ -125,14 +149,21 @@ class RestApiConnector(BaseConnector):
             for ep in self._config_model.endpoints:
                 if pattern and pattern.lower() not in ep['name'].lower():
                     continue
-                assets.append({
+                
+                asset = {
                     "name": ep['name'],
                     "asset_type": "endpoint",
                     "path": ep['path'],
-                    "metadata": ep if include_metadata else {}
-                })
+                }
+                if include_metadata:
+                    asset["metadata"] = {
+                        **ep,
+                        "base_url": self._config_model.base_url,
+                        "auth_type": self._config_model.auth_type
+                    }
+                assets.append(asset)
         
-        if not assets:
+        if not assets and not pattern:
             assets.append({"name": "root", "asset_type": "endpoint", "path": "/"})
             
         return assets
@@ -143,22 +174,40 @@ class RestApiConnector(BaseConnector):
         """
         self.connect()
         try:
-            # We use asset as path directly or lookup from configured endpoints
             path = self._get_path(asset)
-            res = self.client.get(path, params={self._config_model.limit_param: sample_size})
+            
+            # Use pagination params for sampling
+            params = {}
+            if self._config_model.pagination_type == "limit_offset":
+                params[self._config_model.limit_param] = sample_size
+            elif self._config_model.pagination_type == "page_number":
+                params[self._config_model.page_size_param] = sample_size
+
+            res = self.client.get(path, params=params)
             res.raise_for_status()
             
             data = res.json()
             records = self._extract_records(data)
             
             if not records:
-                return {"asset": asset, "columns": [], "message": "No records found to infer schema"}
+                return {
+                    "asset": asset, 
+                    "columns": [], 
+                    "sample_count": 0,
+                    "message": "No records found to infer schema"
+                }
             
             df = pd.DataFrame(records)
             return {
                 "asset": asset,
+                "sample_count": len(records),
                 "columns": [
-                    {"name": str(col), "type": self._map_dtype(dtype), "native_type": str(dtype)} 
+                    {
+                        "name": str(col), 
+                        "type": self._map_dtype(dtype), 
+                        "native_type": str(dtype),
+                        "nullable": df[col].isnull().any()
+                    } 
                     for col, dtype in df.dtypes.items()
                 ]
             }
@@ -170,11 +219,8 @@ class RestApiConnector(BaseConnector):
         Fetch a sample of data from the endpoint.
         """
         try:
-            df_iter = self.read_batch(asset, limit=limit)
-            df = next(df_iter)
-            return df.to_dict(orient="records")
-        except StopIteration:
-            return []
+            # Use the BaseConnector implementation which calls read_batch
+            return super().fetch_sample(asset, limit=limit, **kwargs)
         except Exception as e:
             logger.error(f"Sample fetch failed for {asset}: {e}")
             return []
@@ -222,7 +268,6 @@ class RestApiConnector(BaseConnector):
                 if inc_filter and isinstance(inc_filter, dict):
                     for col, val in inc_filter.items():
                         if col in df.columns:
-                            # Basic string/numeric comparison
                             df = df[df[col] > val]
 
                 if not df.empty:
@@ -253,25 +298,46 @@ class RestApiConnector(BaseConnector):
         self, data: Union[pd.DataFrame, Iterator[pd.DataFrame]], asset: str, mode: str = "append", **kwargs
     ) -> int:
         """
-        Writes data to the REST API via POST requests.
+        Writes data to the REST API via POST/PUT/PATCH requests.
+        Supports record-by-record or batch writing.
         """
         self.connect()
         path = self._get_path(asset)
         total = 0
         
         data_iter = [data] if isinstance(data, pd.DataFrame) else data
+        method = self._config_model.write_method.upper()
 
         for df in data_iter:
-            for record in df.to_dict(orient="records"):
-                try:
-                    # Mode could influence method (append -> POST, overwrite -> PUT/DELETE+POST)
-                    # For a generic REST connector, we'll default to POST for each record.
-                    res = self.client.post(path, json=record)
-                    res.raise_for_status()
-                    total += 1
-                except Exception as e:
-                    logger.error(f"REST write failed for record: {e}")
-                    # In production, we might want to continue or fail depending on config
+            records = df.where(pd.notnull(df), None).to_dict(orient="records")
+            
+            if self._config_model.batch_size > 1:
+                # Batch Writing
+                for i in range(0, len(records), self._config_model.batch_size):
+                    chunk = records[i : i + self._config_model.batch_size]
+                    payload = chunk
+                    if self._config_model.batch_key:
+                        payload = {self._config_model.batch_key: chunk}
+                    
+                    try:
+                        res = self.client.request(method, path, json=payload)
+                        res.raise_for_status()
+                        total += len(chunk)
+                    except Exception as e:
+                        logger.error(f"REST batch write failed: {e}")
+                        raise DataTransferError(f"REST batch write failed: {e}")
+            else:
+                # Record-by-record Writing
+                for record in records:
+                    try:
+                        res = self.client.request(method, path, json=record)
+                        res.raise_for_status()
+                        total += 1
+                    except Exception as e:
+                        logger.error(f"REST record write failed: {e}")
+                        # In production, we might want to continue or fail depending on config
+                        if kwargs.get("strict", False):
+                            raise DataTransferError(f"REST record write failed: {e}")
         
         return total
 
