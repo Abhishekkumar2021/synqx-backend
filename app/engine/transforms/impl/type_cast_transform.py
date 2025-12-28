@@ -1,4 +1,4 @@
-from typing import Iterator, Dict, Any
+from typing import Iterator
 import pandas as pd
 from app.engine.transforms.base import BaseTransform
 from app.core.errors import ConfigurationError
@@ -29,7 +29,7 @@ class TypeCastTransform(BaseTransform):
                             df[col] = pd.to_datetime(df[col], errors='coerce')
                         else:
                             df[col] = df[col].astype(dtype)
-                    except Exception as e:
+                    except Exception:
                         # Log warning or handle error
                         pass
             yield df

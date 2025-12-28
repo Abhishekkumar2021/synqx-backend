@@ -11,7 +11,6 @@ from app.models.base import Base, AuditMixin, SoftDeleteMixin, OwnerMixin
 from app.models.enums import ConnectorType, AssetType
 
 if TYPE_CHECKING:
-    from app.models.pipelines import Pipeline  # Avoid circular import
     from app.models.execution import Watermark
     from app.models.environment import Environment
 

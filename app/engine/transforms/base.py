@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List
 import pandas as pd
 from app.core.logging import get_logger
 

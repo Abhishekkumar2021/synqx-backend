@@ -1,7 +1,10 @@
-from typing import Iterator, Dict, Any, List, Optional
+from typing import Iterator, Dict
 import pandas as pd
 from app.engine.transforms.base import BaseTransform
+from app.core.logging import get_logger
 from app.core.errors import ConfigurationError
+
+logger = get_logger(__name__)
 
 class JoinTransform(BaseTransform):
     """

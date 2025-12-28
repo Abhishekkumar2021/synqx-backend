@@ -1,10 +1,13 @@
-from typing import Any, Dict, List, Optional, Iterator, Union
-import pandas as pd
+from typing import Any, Dict, Iterator, List, Optional, Union
 import redis
-from app.connectors.base import BaseConnector
-from app.core.errors import ConfigurationError, ConnectionFailedError, DataTransferError
-from pydantic import Field
+import pandas as pd
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
+from app.connectors.base import BaseConnector
+from app.core.errors import ConfigurationError, DataTransferError, ConnectionFailedError
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 class RedisConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)

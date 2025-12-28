@@ -1,5 +1,5 @@
 import json
-from typing import Optional, Any, Callable, TypeVar, Union
+from typing import Optional, Any, Callable, TypeVar
 from functools import wraps
 import redis
 from app.core.config import settings

@@ -101,7 +101,7 @@ class BaseConnector(ABC):
             return df.where(pd.notnull(df), None).to_dict(orient="records")
         except StopIteration:
             return []
-        except Exception as e:
+        except Exception:
             # If read_batch fails, we return an empty list or re-raise if it's a critical error
             # For sample data, returning empty list is often safer for UI
             return []

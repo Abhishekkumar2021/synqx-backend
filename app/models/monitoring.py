@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
 from sqlalchemy import (
     Integer, String, Boolean, DateTime, Text, ForeignKey, 
-    UniqueConstraint, Index, JSON, Enum as SQLEnum
+    Index, JSON, Enum as SQLEnum
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
@@ -14,7 +14,7 @@ from app.models.enums import (
 
 if TYPE_CHECKING:
     from app.models.pipelines import Pipeline
-    from app.models.execution import Job, StepRun
+    from app.models.execution import Job
 
 class SchedulerEvent(Base, AuditMixin):
     """Track scheduler activities and triggers"""
@@ -126,7 +126,7 @@ class AlertConfig(Base, AuditMixin, SoftDeleteMixin, OwnerMixin):
         return f"<AlertConfig(id={self.id}, name='{self.name}', type={self.alert_type})>"
 
 
-class Alert(Base, AuditMixin):
+class Alert(Base, AuditMixin, OwnerMixin):
     """Individual alert instances"""
     __tablename__ = "alerts"
 

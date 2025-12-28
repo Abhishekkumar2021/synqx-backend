@@ -104,7 +104,7 @@ class PipelineService:
             self.db_session.refresh(db_pipeline)
 
             logger.info(
-                f"Pipeline created successfully",
+                "Pipeline created successfully",
                 extra={
                     "pipeline_id": db_pipeline.id,
                     "pipeline_name": db_pipeline.name,
@@ -118,7 +118,7 @@ class PipelineService:
             self.db_session.rollback()
             logger.error(f"Integrity constraint violation creating pipeline: {e}")
             raise AppError(
-                f"Pipeline creation failed: duplicate name or invalid reference"
+                "Pipeline creation failed: duplicate name or invalid reference"
             ) from e
 
         except ConfigurationError as e:
@@ -129,7 +129,7 @@ class PipelineService:
         except SQLAlchemyError as e:
             self.db_session.rollback()
             logger.error(f"Database error creating pipeline: {e}", exc_info=True)
-            raise AppError(f"Failed to create pipeline due to database error") from e
+            raise AppError("Failed to create pipeline due to database error") from e
 
         except Exception as e:
             self.db_session.rollback()
@@ -192,7 +192,7 @@ class PipelineService:
 
             return db_version
 
-        except ConfigurationError as e:
+        except ConfigurationError:
             self.db_session.rollback()
             raise
         except Exception as e:
@@ -408,6 +408,7 @@ class PipelineService:
         job = Job(
             pipeline_id=pipeline_id,
             pipeline_version_id=pipeline_version.id,
+            user_id=user_id or pipeline.user_id,
             correlation_id=str(uuid.uuid4()),
             status=JobStatus.PENDING,
             created_by=str(user_id) if user_id else None

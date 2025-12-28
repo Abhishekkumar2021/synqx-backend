@@ -34,6 +34,7 @@ from app.services.vault_service import VaultService
 from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.models.enums import ConnectorType, AssetType
+from app.services.dependency_service import DependencyService
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -851,8 +852,6 @@ def get_connection_environment(
 
 # --- Dependency Management ---
 
-from app.services.dependency_service import DependencyService
-
 @router.post("/{connection_id}/environment/initialize", summary="Initialize environment")
 def initialize_environment(
     connection_id: int,
@@ -861,7 +860,7 @@ def initialize_environment(
     current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
-        service = DependencyService(db, connection_id)
+        service = DependencyService(db, connection_id, user_id=current_user.id)
         env = service.initialize_environment(language)
         return {"id": env.id, "status": env.status, "version": env.version}
     except Exception as e:
@@ -875,7 +874,7 @@ def list_dependencies(
     current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
-        service = DependencyService(db, connection_id)
+        service = DependencyService(db, connection_id, user_id=current_user.id)
         return service.list_packages(language)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -889,7 +888,7 @@ def install_dependency(
     current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
-        service = DependencyService(db, connection_id)
+        service = DependencyService(db, connection_id, user_id=current_user.id)
         return {"output": service.install_package(language, package)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -903,7 +902,7 @@ def uninstall_dependency(
     current_user: models.User = Depends(deps.get_current_user),
 ):
     try:
-        service = DependencyService(db, connection_id)
+        service = DependencyService(db, connection_id, user_id=current_user.id)
         return {"output": service.uninstall_package(language, package)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
-from sqlalchemy import Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy import String, Boolean, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, AuditMixin, OwnerMixin

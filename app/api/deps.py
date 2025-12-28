@@ -1,5 +1,5 @@
 from typing import Generator, Optional
-from fastapi import Depends, HTTPException, status, Header, Security
+from fastapi import Depends, HTTPException, status, Security
 from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session

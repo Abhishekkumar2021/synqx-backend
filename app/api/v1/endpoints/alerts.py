@@ -1,7 +1,6 @@
 from typing import List, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
 
 from app import models
 from app.schemas import alert as alert_schema
@@ -76,16 +75,8 @@ def list_alerts(
     """
     List individual alerts with pagination.
     """
-    query = db.query(models.Alert).outerjoin(
-        models.AlertConfig, models.Alert.alert_config_id == models.AlertConfig.id
-    ).filter(
-        or_(
-            models.AlertConfig.user_id == current_user.id,
-            and_(
-                models.Alert.alert_config_id.is_(None),
-                models.Alert.recipient == str(current_user.id)
-            )
-        )
+    query = db.query(models.Alert).filter(
+        models.Alert.user_id == current_user.id
     )
     
     total = query.count()
@@ -109,17 +100,9 @@ def update_alert_status(
     """
     Update alert status (e.g., acknowledge).
     """
-    alert = db.query(models.Alert).outerjoin(
-        models.AlertConfig, models.Alert.alert_config_id == models.AlertConfig.id
-    ).filter(
+    alert = db.query(models.Alert).filter(
         models.Alert.id == alert_id,
-        or_(
-            models.AlertConfig.user_id == current_user.id,
-            and_(
-                models.Alert.alert_config_id.is_(None),
-                models.Alert.recipient == str(current_user.id)
-            )
-        )
+        models.Alert.user_id == current_user.id
     ).first()
     
     if not alert:

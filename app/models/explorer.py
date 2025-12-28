@@ -1,9 +1,11 @@
-from sqlalchemy import Integer, String, Text, ForeignKey, Integer, DateTime
+from typing import Optional, TYPE_CHECKING
+from sqlalchemy import Integer, String, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from datetime import datetime, timezone
-from typing import Optional
 
 from app.models.base import Base, AuditMixin
+
+if TYPE_CHECKING:
+    from app.models.connections import Connection
 
 class QueryHistory(Base, AuditMixin):
     __tablename__ = "query_history"

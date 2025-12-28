@@ -1,6 +1,4 @@
-import setuptools  # Patch for Python 3.12+ distutils removal
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 from celery.exceptions import SoftTimeLimitExceeded, Retry
 from app.core.celery_app import celery_app
 from app.core.logging import get_logger
@@ -111,7 +109,8 @@ def execute_pipeline_task(self, job_id: int) -> str:
 
             # Broadcast global list update
             try:
-                manager.broadcast_sync("jobs_list", {"type": "job_list_update"})
+                from app.core.websockets import manager as ws_manager
+                ws_manager.broadcast_sync("jobs_list", {"type": "job_list_update"})
             except Exception as e:
                 logger.error(f"Failed to broadcast job start: {e}")
 
@@ -218,7 +217,7 @@ def execute_pipeline_task(self, job_id: int) -> str:
                             alert_type=AlertType.JOB_SUCCESS,
                             pipeline_id=job.pipeline_id,
                             job_id=job.id,
-                            message=f"Pipeline execution completed successfully",
+                            message="Pipeline execution completed successfully",
                             level=AlertLevel.SUCCESS
                         )
                     DBLogger.log_job(session, job.id, "INFO", "Job processing finalized successfully", source="worker")
@@ -242,7 +241,6 @@ def execute_pipeline_task(self, job_id: int) -> str:
                 # Catch actual pipeline execution failure
                 logger.error(f"Pipeline execution failed: {e}", extra={"job_id": job_id}, exc_info=True)
                 
-                from app.core.errors import PipelineExecutionError
                 should_retry = _should_retry_job(job, e, self.request.retries)
 
                 if should_retry and self.request.retries < self.max_retries:
@@ -343,7 +341,6 @@ def cleanup_old_jobs(days_to_keep: int = 30) -> str:
 
     try:
         from sqlalchemy import and_
-        from app.models.execution import PipelineRun, StepRun
 
         with session_scope() as session:
             cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
@@ -390,8 +387,6 @@ def _mark_job_failed(
     session, job: Job, error_message: str, is_infra_error: bool = False
 ) -> None:
     """Mark a job as failed and log the error."""
-    from app.models.monitoring import Alert, AlertConfig
-    from app.models.pipelines import Pipeline
 
     job.status = JobStatus.FAILED
     job.completed_at = datetime.now(timezone.utc)
@@ -418,8 +413,8 @@ def _mark_job_failed(
     session.commit()
 
     # Broadcast final job status to UI
-    from app.core.websockets import manager
-    manager.broadcast_sync(f"job_telemetry:{job.id}", {
+    from app.core.websockets import manager as ws_manager
+    ws_manager.broadcast_sync(f"job_telemetry:{job.id}", {
         "type": "job_update",
         "job_id": job.id,
         "status": job.status.value,

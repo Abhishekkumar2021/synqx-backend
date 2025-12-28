@@ -1,12 +1,12 @@
 import os
 import subprocess
-import shutil
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import Dict, Optional
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.models.environment import Environment
+from app.models.connections import Connection
 from app.core.errors import AppError
 
 logger = logging.getLogger(__name__)
@@ -18,11 +18,26 @@ class DependencyService:
     
     BASE_ENV_PATH = "data/environments"
 
-    def __init__(self, db: Session, connection_id: int):
+    def __init__(self, db: Session, connection_id: int, user_id: Optional[int] = None):
         self.db = db
         self.connection_id = connection_id
+        self.user_id = user_id
+        
+        # Verify ownership if user_id is provided
+        if user_id:
+            self._ensure_ownership()
+            
         self.base_env_path = os.path.abspath(os.path.join(self.BASE_ENV_PATH, str(connection_id)))
         self._ensure_base_path()
+
+    def _ensure_ownership(self):
+        """Check if the user owns the connection."""
+        conn = self.db.query(Connection).filter(
+            Connection.id == self.connection_id,
+            Connection.user_id == self.user_id
+        ).first()
+        if not conn:
+            raise AppError("Connection not found or access denied", status_code=404)
 
     def _ensure_base_path(self):
         if not os.path.exists(self.base_env_path):

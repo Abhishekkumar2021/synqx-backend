@@ -21,7 +21,7 @@ from app.core.db_logging import DBLogger
 from app.services.vault_service import VaultService
 from app.connectors.factory import ConnectorFactory
 from app.engine.transforms.factory import TransformFactory
-from app.core.errors import AppError, ConfigurationError
+from app.core.errors import AppError
 from app.engine.runner_core.state_manager import StateManager
 from app.engine.runner_core.forensics import ForensicSniffer
 
@@ -234,7 +234,7 @@ class NodeExecutor:
                 max_val = None
                 
                 # Extract data
-                logger.info(f"  Extracting data in batches...")
+                logger.info("  Extracting data in batches...")
                 with connector.session() as session:
                     for chunk_idx, chunk in enumerate(session.read_batch(**read_params), 1):
                         on_chunk(chunk, direction="out")
@@ -352,7 +352,7 @@ class NodeExecutor:
                 else:
                     # Single input transform
                     if not input_iters:
-                        logger.warning(f"  No input data for transform node")
+                        logger.warning("  No input data for transform node")
                         data_iter = iter([])
                     else:
                         upstream_it = next(iter(input_iters.values()))

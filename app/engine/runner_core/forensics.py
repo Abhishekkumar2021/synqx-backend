@@ -10,7 +10,6 @@ import shutil
 import threading
 from typing import Dict, Any, Optional, List
 import pandas as pd
-import numpy as np
 from datetime import datetime, timezone
 
 from app.core.logging import get_logger

@@ -18,19 +18,23 @@ class JobService:
     def __init__(self, db_session: Session):
         self.db_session = db_session
 
-    def get_job(self, job_id: int) -> Optional[Job]:
-        """Get job by ID."""
-        return self.db_session.query(Job).filter(Job.id == job_id).first()
+    def get_job(self, job_id: int, user_id: Optional[int] = None) -> Optional[Job]:
+        """Get job by ID, optionally scoped to a user."""
+        query = self.db_session.query(Job).filter(Job.id == job_id)
+        if user_id:
+            query = query.filter(Job.user_id == user_id)
+        return query.first()
 
     def list_jobs(
         self,
+        user_id: int,
         pipeline_id: Optional[int] = None,
         status: Optional[JobStatus] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> Tuple[List[Job], int]:
-        """List jobs with optional filtering."""
-        query = self.db_session.query(Job)
+        """List jobs for a specific user with optional filtering."""
+        query = self.db_session.query(Job).filter(Job.user_id == user_id)
 
         if pipeline_id:
             query = query.filter(Job.pipeline_id == pipeline_id)
@@ -43,9 +47,9 @@ class JobService:
 
         return jobs, total
 
-    def cancel_job(self, job_id: int, reason: Optional[str] = None) -> Job:
-        """Cancel a running or pending job."""
-        job = self.get_job(job_id)
+    def cancel_job(self, job_id: int, user_id: int, reason: Optional[str] = None) -> Job:
+        """Cancel a running or pending job for a specific user."""
+        job = self.get_job(job_id, user_id=user_id)
 
         if not job:
             raise AppError(f"Job {job_id} not found")
@@ -93,7 +97,7 @@ class JobService:
             self.db_session.commit()
 
             logger.info(
-                f"Job {job_id} cancelled", extra={"job_id": job_id, "reason": reason}
+                f"Job {job_id} cancelled", extra={"job_id": job_id, "reason": reason, "user_id": user_id}
             )
 
             return job
@@ -103,9 +107,9 @@ class JobService:
             logger.error(f"Failed to cancel job {job_id}: {e}")
             raise AppError(f"Failed to cancel job: {e}")
 
-    def retry_job(self, job_id: int, force: bool = False) -> Job:
-        """Retry a failed job."""
-        job = self.get_job(job_id)
+    def retry_job(self, job_id: int, user_id: int, force: bool = False) -> Job:
+        """Retry a failed job for a specific user."""
+        job = self.get_job(job_id, user_id=user_id)
 
         if not job:
             raise AppError(f"Job {job_id} not found")
@@ -124,6 +128,7 @@ class JobService:
             new_job = Job(
                 pipeline_id=job.pipeline_id,
                 pipeline_version_id=job.pipeline_version_id,
+                user_id=user_id,
                 correlation_id=job.correlation_id,
                 status=JobStatus.PENDING,
                 retry_count=job.retry_count + 1,
@@ -142,7 +147,7 @@ class JobService:
 
             logger.info(
                 f"Job {job_id} retried as job {new_job.id}",
-                extra={"original_job_id": job_id, "new_job_id": new_job.id},
+                extra={"original_job_id": job_id, "new_job_id": new_job.id, "user_id": user_id},
             )
 
             return new_job
@@ -221,21 +226,23 @@ class PipelineRunService:
     def __init__(self, db_session: Session):
         self.db_session = db_session
 
-    def get_run(self, run_id: int) -> Optional[PipelineRun]:
-        """Get pipeline run by ID."""
-        return (
-            self.db_session.query(PipelineRun).filter(PipelineRun.id == run_id).first()
-        )
+    def get_run(self, run_id: int, user_id: Optional[int] = None) -> Optional[PipelineRun]:
+        """Get pipeline run by ID, optionally scoped to user."""
+        query = self.db_session.query(PipelineRun).filter(PipelineRun.id == run_id)
+        if user_id:
+            query = query.filter(PipelineRun.user_id == user_id)
+        return query.first()
 
     def list_runs(
         self,
+        user_id: int,
         pipeline_id: Optional[int] = None,
         status: Optional[PipelineRunStatus] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> Tuple[List[PipelineRun], int]:
-        """List pipeline runs with optional filtering."""
-        query = self.db_session.query(PipelineRun)
+        """List pipeline runs for a specific user with optional filtering."""
+        query = self.db_session.query(PipelineRun).filter(PipelineRun.user_id == user_id)
 
         if pipeline_id:
             query = query.filter(PipelineRun.pipeline_id == pipeline_id)
@@ -253,10 +260,10 @@ class PipelineRunService:
 
         return runs, total
 
-    def get_run_steps(self, run_id: int) -> List[StepRun]:
-        """Get all step runs for a pipeline run."""
+    def get_run_steps(self, run_id: int, user_id: Optional[int] = None) -> List[StepRun]:
+        """Get all step runs for a pipeline run, optionally scoped to user."""
         from sqlalchemy.orm import joinedload
-        run = self.get_run(run_id)
+        run = self.get_run(run_id, user_id=user_id)
 
         if not run:
             raise AppError(f"Pipeline run {run_id} not found")
@@ -270,11 +277,17 @@ class PipelineRunService:
         )
 
     def get_step_logs(
-        self, step_run_id: int, level: Optional[str] = None
+        self, step_run_id: int, user_id: int, level: Optional[str] = None
     ) -> List[StepLog]:
-        """Get logs for a specific step run."""
-        query = self.db_session.query(StepLog).filter(
-            StepLog.step_run_id == step_run_id
+        """Get logs for a specific step run, scoped to user."""
+        # Check ownership via join
+        query = self.db_session.query(StepLog).join(
+            StepRun, StepLog.step_run_id == StepRun.id
+        ).join(
+            PipelineRun, StepRun.pipeline_run_id == PipelineRun.id
+        ).filter(
+            StepLog.step_run_id == step_run_id,
+            PipelineRun.user_id == user_id
         )
 
         if level:
@@ -282,11 +295,24 @@ class PipelineRunService:
 
         return query.order_by(StepLog.timestamp).all()
 
-    def get_run_metrics(self, pipeline_id: int) -> dict:
-        """Get aggregated metrics for a pipeline's runs."""
+    def get_run_metrics(self, pipeline_id: int, user_id: int) -> dict:
+        """Get aggregated metrics for a pipeline's runs, scoped to user."""
+        # Ensure pipeline belongs to user
+        from app.models.pipelines import Pipeline
+        pipeline_exists = self.db_session.query(Pipeline).filter(
+            Pipeline.id == pipeline_id, 
+            Pipeline.user_id == user_id
+        ).first()
+        
+        if not pipeline_exists:
+            raise AppError("Pipeline not found")
+
         total_runs = (
             self.db_session.query(func.count(PipelineRun.id))
-            .filter(PipelineRun.pipeline_id == pipeline_id)
+            .filter(
+                PipelineRun.pipeline_id == pipeline_id,
+                PipelineRun.user_id == user_id
+            )
             .scalar()
             or 0
         )
@@ -295,6 +321,7 @@ class PipelineRunService:
             self.db_session.query(func.count(PipelineRun.id))
             .filter(
                 PipelineRun.pipeline_id == pipeline_id,
+                PipelineRun.user_id == user_id,
                 PipelineRun.status == PipelineRunStatus.COMPLETED,
             )
             .scalar()
@@ -305,6 +332,7 @@ class PipelineRunService:
             self.db_session.query(func.count(PipelineRun.id))
             .filter(
                 PipelineRun.pipeline_id == pipeline_id,
+                PipelineRun.user_id == user_id,
                 PipelineRun.status == PipelineRunStatus.FAILED,
             )
             .scalar()
@@ -315,6 +343,7 @@ class PipelineRunService:
             self.db_session.query(func.avg(PipelineRun.duration_seconds))
             .filter(
                 PipelineRun.pipeline_id == pipeline_id,
+                PipelineRun.user_id == user_id,
                 PipelineRun.status == PipelineRunStatus.COMPLETED,
                 PipelineRun.duration_seconds.isnot(None),
             )
@@ -323,7 +352,10 @@ class PipelineRunService:
 
         total_records = (
             self.db_session.query(func.sum(PipelineRun.total_loaded))
-            .filter(PipelineRun.pipeline_id == pipeline_id)
+            .filter(
+                PipelineRun.pipeline_id == pipeline_id,
+                PipelineRun.user_id == user_id
+            )
             .scalar()
             or 0
         )

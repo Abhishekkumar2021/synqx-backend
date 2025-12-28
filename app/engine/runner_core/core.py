@@ -4,7 +4,7 @@ FILE 1: pipeline_runner.py - Enhanced DAG Runner
 =================================================================================
 """
 
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Set
 import pandas as pd
 from sqlalchemy.orm import Session
 import concurrent.futures
@@ -343,7 +343,7 @@ class PipelineRunner:
         )
 
         logger.info("=" * 80)
-        logger.info(f"PIPELINE EXECUTION STARTED")
+        logger.info("PIPELINE EXECUTION STARTED")
         logger.info(
             f"Pipeline: {pipeline_version.pipeline_id}, Version: {pipeline_version.id}"
         )

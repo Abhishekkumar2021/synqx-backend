@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 import secrets
 from typing import List, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app import models

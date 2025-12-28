@@ -14,6 +14,7 @@ from app.db.session import engine
 from app.core.logging import setup_logging, get_logger
 from app.middlewares.correlation import CorrelationMiddleware
 from app.models import Base
+from app.api.v1.api import api_router
 import app.connectors.impl  # Register connectors
 import app.engine.transforms.impl  # Register transforms
 
@@ -94,8 +95,6 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error("unhandled_error", error=str(exc), exc_info=True)
     return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
-
-from app.api.v1.api import api_router
 
 @app.get("/", tags=["System"])
 async def root():

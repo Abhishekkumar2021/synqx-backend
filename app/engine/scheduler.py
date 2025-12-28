@@ -360,7 +360,7 @@ class Scheduler:
             self.db_session.commit()
 
             logger.info(
-                f"Successfully triggered scheduled run",
+                "Successfully triggered scheduled run",
                 extra={
                     "pipeline_id": pipeline.id,
                     "job_id": job.id,

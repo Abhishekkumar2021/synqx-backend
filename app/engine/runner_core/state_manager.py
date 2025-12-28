@@ -3,7 +3,6 @@
 FILE 6: state_manager.py - Enhanced State Manager with Real-time Telemetry
 =================================================================================
 """
-import asyncio
 from typing import Optional
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
@@ -91,9 +90,16 @@ class StateManager:
                 .scalar()
             ) or 0
             
+            # Fetch job to get user_id
+            from app.models.execution import Job
+            job = self.db.query(Job).filter(Job.id == self.job_id).first()
+            if not job:
+                raise Exception(f"Job {self.job_id} not found during run initialization")
+
             pipeline_run = PipelineRun(
                 job_id=self.job_id,
                 pipeline_id=pipeline_id,
+                user_id=job.user_id,
                 pipeline_version_id=version_id,
                 run_number=max_run + 1,
                 status=PipelineRunStatus.RUNNING,

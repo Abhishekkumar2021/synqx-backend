@@ -1,11 +1,12 @@
-from typing import Any, Dict, List, Optional, Iterator, Union
+import os
+from typing import Any, Dict, Iterator, List, Optional, Union
 import pandas as pd
 import s3fs
-from app.connectors.base import BaseConnector
-from app.core.errors import ConfigurationError, ConnectionFailedError, DataTransferError
-from app.core.logging import get_logger
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
+from app.connectors.base import BaseConnector
+from app.core.errors import ConfigurationError, DataTransferError, SchemaDiscoveryError, ConnectionFailedError
+from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 

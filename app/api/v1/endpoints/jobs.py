@@ -15,10 +15,11 @@ from app.schemas.job import (
     UnifiedLogRead,
 )
 from app.services.job_service import JobService, PipelineRunService
-from app.api.deps import get_db
+from app.api.deps import get_db, get_current_user
 from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.models.enums import JobStatus, PipelineRunStatus
+from app.models.user import User
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -36,10 +37,12 @@ def list_jobs(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         service = JobService(db)
         jobs, total = service.list_jobs(
+            user_id=current_user.id,
             pipeline_id=pipeline_id,
             status=status,
             limit=limit,
@@ -70,9 +73,10 @@ def list_jobs(
 def get_job(
     job_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     service = JobService(db)
-    job = service.get_job(job_id)
+    job = service.get_job(job_id, user_id=current_user.id)
     
     if not job:
         raise HTTPException(
@@ -92,21 +96,25 @@ def get_job(
 def get_job_run(
     job_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     service = PipelineRunService(db)
     # Find pipeline run by job_id
     from app.models.execution import PipelineRun, Job
     from app.schemas.pipeline import PipelineVersionRead
-    run = db.query(PipelineRun).filter(PipelineRun.job_id == job_id).first()
+    
+    # Check job ownership
+    job = db.query(Job).filter(Job.id == job_id, Job.user_id == current_user.id).first()
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Not found", "message": f"Job {job_id} not found"}
+        )
+
+    run = db.query(PipelineRun).filter(PipelineRun.job_id == job_id, PipelineRun.user_id == current_user.id).first()
     
     if not run:
         # If no run record yet, return a synthetic one based on the Job to allow progress display
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if not job:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={"error": "Not found", "message": f"Job {job_id} not found"}
-            )
         
         # Calculate total nodes from the version
         total_nodes = 0
@@ -144,7 +152,7 @@ def get_job_run(
         response.version = PipelineVersionRead.model_validate(run.version)
     
     # Include step runs
-    step_runs = service.get_run_steps(run.id)
+    step_runs = service.get_run_steps(run.id, user_id=current_user.id)
     response.step_runs = [StepRunRead.model_validate(s) for s in step_runs]
     
     return response
@@ -160,10 +168,11 @@ def cancel_job(
     job_id: int,
     cancel_request: JobCancelRequest = Body(default=JobCancelRequest()),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         service = JobService(db)
-        job = service.cancel_job(job_id, reason=cancel_request.reason)
+        job = service.cancel_job(job_id, user_id=current_user.id, reason=cancel_request.reason)
         return JobRead.model_validate(job)
         
     except AppError as e:
@@ -190,10 +199,11 @@ def retry_job(
     job_id: int,
     retry_request: JobRetryRequest = Body(default=JobRetryRequest()),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         service = JobService(db)
-        new_job = service.retry_job(job_id, force=retry_request.force)
+        new_job = service.retry_job(job_id, user_id=current_user.id, force=retry_request.force)
         return JobRead.model_validate(new_job)
         
     except AppError as e:
@@ -220,10 +230,11 @@ def get_job_logs(
     job_id: int,
     level: Optional[str] = Query(None, description="Filter by log level"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         service = JobService(db)
-        job = service.get_job(job_id)
+        job = service.get_job(job_id, user_id=current_user.id)
         
         if not job:
             raise HTTPException(
@@ -256,10 +267,12 @@ def list_runs(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         service = PipelineRunService(db)
         runs, total = service.list_runs(
+            user_id=current_user.id,
             pipeline_id=pipeline_id,
             status=status,
             limit=limit,
@@ -290,9 +303,10 @@ def list_runs(
 def get_run(
     run_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     service = PipelineRunService(db)
-    run = service.get_run(run_id)
+    run = service.get_run(run_id, user_id=current_user.id)
     
     if not run:
         raise HTTPException(
@@ -302,7 +316,7 @@ def get_run(
     
     response = PipelineRunDetailRead.model_validate(run)
     
-    step_runs = service.get_run_steps(run_id)
+    step_runs = service.get_run_steps(run_id, user_id=current_user.id)
     response.step_runs = [StepRunRead.model_validate(s) for s in step_runs]
     
     return response
@@ -317,10 +331,11 @@ def get_run(
 def get_run_steps(
     run_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         service = PipelineRunService(db)
-        steps = service.get_run_steps(run_id)
+        steps = service.get_run_steps(run_id, user_id=current_user.id)
         return [StepRunRead.model_validate(s) for s in steps]
         
     except AppError as e:
@@ -347,10 +362,11 @@ def get_step_logs(
     step_id: int,
     level: Optional[str] = Query(None, description="Filter by log level"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         service = PipelineRunService(db)
-        logs = service.get_step_logs(step_id, level=level)
+        logs = service.get_step_logs(step_id, user_id=current_user.id, level=level)
         return [StepLogRead.model_validate(log) for log in logs]
         
     except Exception as e:
@@ -373,14 +389,20 @@ def get_step_data(
     limit: int = Query(10, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
-        from app.models.execution import StepRun
+        from app.models.execution import StepRun, PipelineRun
         from app.engine.runner_core.forensics import ForensicSniffer
         
-        step = db.query(StepRun).filter(StepRun.id == step_id).first()
+        # Ownership check
+        step = db.query(StepRun).join(PipelineRun).filter(
+            StepRun.id == step_id, 
+            PipelineRun.user_id == current_user.id
+        ).first()
+        
         if not step:
-            logger.error(f"Step run {step_id} not found")
+            logger.error(f"Step run {step_id} not found or access denied")
             raise HTTPException(status_code=404, detail=f"Step run {step_id} not found")
         
         if step.pipeline_run_id != run_id:
@@ -412,7 +434,12 @@ def get_step_data(
     summary="Clear Forensic Cache",
     description="Manually purge all cached forensic Parquet files."
 )
-def clear_forensic_cache():
+def clear_forensic_cache(
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Only superusers can clear forensic cache")
+        
     try:
         from app.engine.runner_core.forensics import ForensicSniffer
         ForensicSniffer.cleanup_all()
@@ -430,12 +457,15 @@ def clear_forensic_cache():
 def get_pipeline_metrics(
     pipeline_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         service = PipelineRunService(db)
-        metrics = service.get_run_metrics(pipeline_id)
+        metrics = service.get_run_metrics(pipeline_id, user_id=current_user.id)
         return metrics
         
+    except AppError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Error getting pipeline metrics: {e}", exc_info=True)
         raise HTTPException(

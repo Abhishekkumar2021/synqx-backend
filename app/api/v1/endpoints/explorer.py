@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 import time
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.api.deps import get_db, get_current_user
@@ -38,7 +38,6 @@ class HistoryItem(BaseModel):
     class Config:
         from_attributes = True
 
-@router.post("/{connection_id}/execute", response_model=QueryResponse)
 def execute_connection_query(
     connection_id: int,
     request: QueryRequest,
@@ -50,7 +49,7 @@ def execute_connection_query(
     Supports SQL and NoSQL depending on the connector type.
     """
     service = connection_service.ConnectionService(db)
-    connection = service.get_connection(connection_id)
+    connection = service.get_connection(connection_id, user_id=current_user.id)
     if not connection:
         raise HTTPException(status_code=404, detail="Connection not found")
     
@@ -65,7 +64,7 @@ def execute_connection_query(
         # Inject Execution Context for Custom Script
         if connection.connector_type.value == "custom_script":
             from app.services.dependency_service import DependencyService
-            dep_service = DependencyService(db, connection.id)
+            dep_service = DependencyService(db, connection.id, user_id=current_user.id)
             exec_ctx = {}
             exec_ctx.update(dep_service.get_execution_context("python"))
             exec_ctx.update(dep_service.get_execution_context("node"))
@@ -154,17 +153,16 @@ def clear_query_history(
     db.commit()
     return {"status": "success"}
 
-@router.get("/{connection_id}/schema-metadata")
 def get_connection_schema_metadata(
     connection_id: int,
     db: Session = Depends(get_db),
-    current_user: Any = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Get full schema metadata for autocompletion.
     """
     service = connection_service.ConnectionService(db)
-    connection = service.get_connection(connection_id)
+    connection = service.get_connection(connection_id, user_id=current_user.id)
     if not connection:
         raise HTTPException(status_code=404, detail="Connection not found")
     
@@ -174,7 +172,7 @@ def get_connection_schema_metadata(
         # Inject Execution Context for Custom Script
         if connection.connector_type.value == "custom_script":
             from app.services.dependency_service import DependencyService
-            dep_service = DependencyService(db, connection.id)
+            dep_service = DependencyService(db, connection.id, user_id=current_user.id)
             exec_ctx = {}
             exec_ctx.update(dep_service.get_execution_context("python"))
             exec_ctx.update(dep_service.get_execution_context("node"))

@@ -7,7 +7,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
-from app.models.base import Base, AuditMixin
+from app.models.base import Base, AuditMixin, OwnerMixin
 from app.models.enums import (
     JobStatus, PipelineRunStatus, OperatorRunStatus, 
     RetryStrategy, OperatorType
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from app.models.connections import Asset
     from app.models.monitoring import JobLog, StepLog
 
-class Job(Base, AuditMixin):
+class Job(Base, AuditMixin, OwnerMixin):
     """Job execution wrapper for Celery tasks"""
     __tablename__ = "jobs"
 
@@ -73,7 +73,7 @@ class Job(Base, AuditMixin):
         return f"<Job(id={self.id}, status={self.status}, pipeline_id={self.pipeline_id})>"
 
 
-class PipelineRun(Base, AuditMixin):
+class PipelineRun(Base, AuditMixin, OwnerMixin):
     """Single logical execution of a pipeline"""
     __tablename__ = "pipeline_runs"
 

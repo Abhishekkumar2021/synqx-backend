@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Dict, Set, Any, Optional
+from typing import Dict, Set, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 from redis import asyncio as aioredis
 from app.core.config import settings
