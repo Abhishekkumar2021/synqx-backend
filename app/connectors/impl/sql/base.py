@@ -84,7 +84,7 @@ class SQLConnector(BaseConnector):
         self.connect()
         try:
             inspector = inspect(self._engine)
-            db_schema = self.config.get("db_schema") or self.config.get("schema")
+            _, db_schema = self.normalize_asset_identifier("") # Get default schema
             
             tables = inspector.get_table_names(schema=db_schema)
             views = inspector.get_view_names(schema=db_schema)
@@ -118,7 +118,8 @@ class SQLConnector(BaseConnector):
 
     def _get_row_count(self, table: str, schema: Optional[str] = None) -> Optional[int]:
         try:
-            table_ref = f'{schema}.{table}' if schema else f'{table}'
+            name, actual_schema = self.normalize_asset_identifier(table)
+            table_ref = f"{actual_schema}.{name}" if actual_schema else name
             query = text(f"SELECT COUNT(*) FROM {table_ref}")
             return int(self._connection.execute(query).scalar())
         except Exception:
@@ -128,25 +129,26 @@ class SQLConnector(BaseConnector):
         self, asset: str, sample_size: int = 1000, mode: str = "auto", **kwargs
     ) -> Dict[str, Any]:
         self.connect()
-        db_schema = self.config.get("db_schema") or self.config.get("schema")
+        name, schema = self.normalize_asset_identifier(asset)
         
         if mode == "metadata":
-            return self._schema_from_metadata(asset, db_schema)
+            return self._schema_from_metadata(name, schema)
         
         try:
-            return self._schema_from_metadata(asset, db_schema)
+            return self._schema_from_metadata(name, schema)
         except Exception:
             if mode == "sample" or mode == "auto":
-                return self._schema_from_sample(asset, db_schema, sample_size)
+                return self._schema_from_sample(asset, schema, sample_size)
             raise
 
     def _schema_from_metadata(self, asset: str, schema: Optional[str]) -> Dict[str, Any]:
         try:
+            name, actual_schema = self.normalize_asset_identifier(asset)
             inspector = inspect(self._engine)
-            columns = inspector.get_columns(asset, schema=schema)
+            columns = inspector.get_columns(name, schema=actual_schema)
             return {
-                "asset": asset,
-                "schema": schema,
+                "asset": name,
+                "schema": actual_schema,
                 "columns": [
                     {
                         "name": col["name"],
@@ -163,9 +165,10 @@ class SQLConnector(BaseConnector):
     def _schema_from_sample(self, asset: str, schema: Optional[str], sample_size: int) -> Dict[str, Any]:
         try:
             df = next(self.read_batch(asset, limit=sample_size))
+            name, actual_schema = self.normalize_asset_identifier(asset)
             return {
-                "asset": asset,
-                "schema": schema,
+                "asset": name,
+                "schema": actual_schema,
                 "columns": [{"name": col, "type": str(dtype)} for col, dtype in df.dtypes.items()],
             }
         except Exception as e:
@@ -182,23 +185,15 @@ class SQLConnector(BaseConnector):
         if custom_query:
             clean_query = custom_query.strip().rstrip(';')
             
-            # Apply incremental filter to custom query if simple enough, 
-            # otherwise simplistic appending might break complex queries.
-            # For now, we assume standard SELECTs or users must handle it in custom query logic manually
-            # if they provide a raw string. 
-            # BUT, we can try to wrap it: SELECT * FROM (custom_query) WHERE ...
-            
             if incremental_filter and isinstance(incremental_filter, dict):
                 where_clauses = []
                 for col, val in incremental_filter.items():
-                    # Check if value is numeric or string to quote accordingly
                     if isinstance(val, (int, float)):
                         where_clauses.append(f"{col} > {val}")
                     else:
                         where_clauses.append(f"{col} > '{val}'")
                 
                 if where_clauses:
-                    # Wrap to safely apply WHERE
                     clean_query = f"SELECT * FROM ({clean_query}) AS subq WHERE {' AND '.join(where_clauses)}"
 
             if limit and "limit" not in clean_query.lower():
@@ -207,9 +202,8 @@ class SQLConnector(BaseConnector):
                 clean_query += f" OFFSET {offset}"
             query = clean_query
         else:
-            schema = self.config.get("db_schema") or self.config.get("schema")
-            table_ref = f'{schema}.{asset}' if schema else f'{asset}'
-            
+            name, schema = self.normalize_asset_identifier(asset)
+            table_ref = f"{schema}.{name}" if schema else name
             query = f"SELECT * FROM {table_ref}"
             
             # Apply Incremental Logic
@@ -230,7 +224,6 @@ class SQLConnector(BaseConnector):
         chunksize = kwargs.pop("chunksize", 10000)
         params = kwargs.pop("params", None)
         try:
-            # Use bind parameters for safety and type handling
             for chunk in pd.read_sql_query(text(query), con=self._connection, chunksize=chunksize, params=params, **kwargs):
                 yield chunk
         except Exception as e:
@@ -245,7 +238,6 @@ class SQLConnector(BaseConnector):
     ) -> List[Dict[str, Any]]:
         self.connect()
         try:
-            # Strip trailing semicolon if present to avoid syntax errors when appending LIMIT
             clean_query = query.strip().rstrip(';')
             
             final_query = clean_query
@@ -255,7 +247,6 @@ class SQLConnector(BaseConnector):
                 final_query += f" OFFSET {offset}"
             
             df = pd.read_sql_query(text(final_query), con=self._connection, **kwargs)
-            # Safe conversion of NaN to None for JSON compliance
             return df.replace({np.nan: None}).to_dict(orient="records")
         except Exception as e:
             raise DataTransferError(f"Query execution failed: {e}")
@@ -264,7 +255,7 @@ class SQLConnector(BaseConnector):
         self, data: Union[pd.DataFrame, Iterator[pd.DataFrame]], asset: str, mode: str = "append", **kwargs
     ) -> int:
         self.connect()
-        schema = self.config.get("db_schema") or self.config.get("schema")
+        name, schema = self.normalize_asset_identifier(asset)
         
         # Normalize mode
         clean_mode = mode.lower()
@@ -273,7 +264,7 @@ class SQLConnector(BaseConnector):
         # Discover target columns to prevent errors from extra columns (e.g. joined results)
         try:
             inspector = inspect(self._engine)
-            target_columns = [c['name'] for c in inspector.get_columns(asset, schema=schema)]
+            target_columns = [c['name'] for c in inspector.get_columns(name, schema=schema)]
         except Exception as e:
             logger.warning(f"Could not inspect columns for {asset}, skipping auto-filter: {e}")
             target_columns = []
@@ -312,7 +303,7 @@ class SQLConnector(BaseConnector):
                     logger.warning(f"Upsert requested for {asset} but generic SQLConnector only supports append/overwrite. Falling back to append.")
 
                 df.to_sql(
-                    name=asset,
+                    name=name,
                     schema=schema,
                     con=self._connection,
                     if_exists=if_exists_val,

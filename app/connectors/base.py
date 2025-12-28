@@ -15,6 +15,20 @@ class BaseConnector(ABC):
         self.config = config
         self.validate_config()
 
+    def normalize_asset_identifier(self, asset: str) -> tuple[str, Optional[str]]:
+        """
+        Standardizes asset identifier handling. 
+        Returns (asset_name, schema_name).
+        If the asset is an FQN (e.g. 'db.schema.table' or 'public.users'), 
+        it splits the last part as the name.
+        Otherwise, it uses the default schema from configuration if available.
+        """
+        config_schema = self.config.get("db_schema") or self.config.get("schema")
+        if "." in asset:
+            parts = asset.rsplit(".", 1)
+            return parts[1], parts[0]
+        return asset, config_schema
+
     @abstractmethod
     def validate_config(self) -> None:
         pass

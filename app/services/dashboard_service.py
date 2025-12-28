@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case, and_, desc, or_
@@ -20,19 +20,44 @@ class DashboardService:
     def __init__(self, db_session: Session):
         self.db = db_session
 
-    def get_stats(self, user_id: int, time_range: str = "24h") -> DashboardStats:
+    def get_stats(
+        self, 
+        user_id: int, 
+        time_range: str = "24h",
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
+    ) -> DashboardStats:
         try:
             now = datetime.now(timezone.utc)
-            start_date = None
+            
+            # Use end_date if provided, otherwise now
+            actual_end_date = end_date if end_date else now
+            if actual_end_date.tzinfo is None:
+                actual_end_date = actual_end_date.replace(tzinfo=timezone.utc)
+
+            actual_start_date = None
             group_interval = 'day'
 
             if time_range == '24h':
-                start_date = now - timedelta(days=1)
+                actual_start_date = actual_end_date - timedelta(days=1)
                 group_interval = 'hour'
             elif time_range == '7d':
-                start_date = now - timedelta(days=7)
+                actual_start_date = actual_end_date - timedelta(days=7)
+                group_interval = 'day'
             elif time_range == '30d':
-                start_date = now - timedelta(days=30)
+                actual_start_date = actual_end_date - timedelta(days=30)
+                group_interval = 'day'
+            elif time_range == 'custom' and start_date:
+                actual_start_date = start_date
+                if actual_start_date.tzinfo is None:
+                    actual_start_date = actual_start_date.replace(tzinfo=timezone.utc)
+                
+                # Determine interval based on duration
+                duration = actual_end_date - actual_start_date
+                if duration.total_seconds() <= 172800: # 48 hours
+                    group_interval = 'hour'
+                else:
+                    group_interval = 'day'
             
             # 1. Global Metrics
             total_pipelines = self.db.query(func.count(Pipeline.id)).filter(
@@ -66,8 +91,10 @@ class DashboardService:
 
             # Period Stats
             period_filters = [Pipeline.user_id == user_id]
-            if start_date:
-                period_filters.append(Job.created_at >= start_date)
+            if actual_start_date:
+                period_filters.append(Job.created_at >= actual_start_date)
+            if end_date:
+                period_filters.append(Job.created_at <= actual_end_date)
 
             jobs_period_query = self.db.query(
                 func.count(Job.id).label("total"),
@@ -130,39 +157,28 @@ class DashboardService:
             }
 
             throughput = []
-            current_bucket = start_date if start_date else (now - timedelta(days=30))
-            # Ensure current_bucket is timezone aware if start_date came from now (which is utc)
-            # Depending on DB, time_bucket from query might be offset-aware or naive.
-            # We will generate buckets based on 'now' and match.
             
-            # Normalize buckets to simple iteration
-            num_buckets = 24 if time_range == '24h' else (7 if time_range == '7d' else 30)
+            # Calculate buckets
+            if not actual_start_date:
+                # Default to 30 days if no start date
+                actual_start_date = actual_end_date - timedelta(days=30)
+            
+            # Normalize buckets
             delta = timedelta(hours=1) if group_interval == 'hour' else timedelta(days=1)
             
-            # Reset minutes/seconds for clean buckets
             if group_interval == 'hour':
-                current_bucket = current_bucket.replace(minute=0, second=0, microsecond=0)
+                current_bucket = actual_start_date.replace(minute=0, second=0, microsecond=0)
             else:
-                current_bucket = current_bucket.replace(hour=0, minute=0, second=0, microsecond=0)
+                current_bucket = actual_start_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
-            for _ in range(num_buckets + 1): # +1 to include current partial bucket
-                # Try to find match. Note: timezones might tricky.
-                # Simplest is to match by day/hour string or timestamp value equality if possible.
-                # Let's use simple matching logic or just append existing data if filling is too complex for mixed TZs.
-                # Actually, given the complexity of TZs in python vs DB, a simpler fill approach:
-                # We will just iterate the stats we got. If it's sparse, the frontend chart usually handles it okay-ish.
-                # But to really fix "empty chart", we need data.
-                # Let's stick to the query result for now but ensure we handle the map correctly if we were to fill.
-                # Given strict instructions to "zero-fill", I will implement it.
-                
-                # Check if we have data for this bucket
-                # We need to match the key format from throughput_map (datetime)
-                # Note: throughput_stats keys might have TZ info. current_bucket has UTC (from now).
-                
-                # Loose matching: check if any key in map is "close" or has same year/month/day/hour
+            # limit the number of buckets to prevent extreme cases
+            max_buckets = 500
+            buckets_count = 0
+
+            while current_bucket <= actual_end_date and buckets_count < max_buckets:
+                buckets_count += 1
                 match = None
                 for key, row in throughput_map.items():
-                    # Handle potentially naive vs aware comparison
                     k = key.replace(tzinfo=timezone.utc) if key.tzinfo is None else key.astimezone(timezone.utc)
                     c = current_bucket.replace(tzinfo=timezone.utc) if current_bucket.tzinfo is None else current_bucket.astimezone(timezone.utc)
                     
@@ -197,7 +213,7 @@ class DashboardService:
             # 4. Recent Activity
             recent_jobs = self.db.query(Job).join(Pipeline).filter(
                 Pipeline.user_id == user_id
-            ).order_by(desc(Job.created_at)).limit(10).all()
+            ).order_by(desc(Job.created_at)).limit(6).all()
 
             activity = []
             for job in recent_jobs:
