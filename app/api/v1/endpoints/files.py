@@ -84,6 +84,34 @@ def download_file(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.post("/{connection_id}/upload")
+async def upload_file(
+    connection_id: int,
+    path: str = "",
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Real-time file upload for a connection."""
+    connector = get_connector(connection_id, db, current_user)
+    try:
+        content = await file.read()
+        filename = file.filename
+        
+        # Ensure path uses forward slashes and doesn't have trailing slash for join
+        clean_path = path.strip().replace('\\', '/')
+        if clean_path.endswith('/'):
+            clean_path = clean_path[:-1]
+            
+        full_remote_path = f"{clean_path}/{filename}" if clean_path else filename
+        
+        success = connector.upload_file(path=full_remote_path, content=content)
+        return {"success": success, "filename": filename, "path": full_remote_path}
+    except NotImplementedError as e:
+        raise HTTPException(status_code=405, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 from pydantic import BaseModel
 
 class SaveFileRequest(BaseModel):
