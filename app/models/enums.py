@@ -9,6 +9,7 @@ class ConnectorType(str, enum.Enum):
     MSSQL = "mssql"
     ORACLE = "oracle"
     SQLITE = "sqlite"
+    DUCKDB = "duckdb"
     # NoSQL
     MONGODB = "mongodb"
     REDIS = "redis"
