@@ -72,4 +72,5 @@ openpyxl
 xlrd
 
 # Other
-numpy
+numpyelasticsearch
+google-cloud-storage
