@@ -6,7 +6,7 @@ import pandas as pd
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from app.connectors.base import BaseConnector
-from app.core.errors import ConfigurationError, ConnectionFailedError, SchemaDiscoveryError
+from app.core.errors import ConfigurationError, ConnectionFailedError, SchemaDiscoveryError, DataTransferError
 from app.core.logging import get_logger
 
 try:
@@ -326,3 +326,90 @@ class SFTPConnector(BaseConnector):
 
     def execute_query(self, query: str, **kwargs) -> List[Dict[str, Any]]:
         raise NotImplementedError("SFTP connector does not support direct queries.")
+
+    # --- Live File Management Implementation ---
+
+    def list_files(self, path: str = "") -> List[Dict[str, Any]]:
+        self.connect()
+        target_path = path if path else self._config_model.base_path
+        results = []
+        try:
+            for entry in self._sftp.listdir_attr(target_path):
+                results.append({
+                    "name": entry.filename,
+                    "path": os.path.join(target_path, entry.filename),
+                    "type": "directory" if stat.S_ISDIR(entry.st_mode) else "file",
+                    "size": entry.st_size,
+                    "modified_at": entry.st_mtime
+                })
+            return results
+        except IOError as e:
+            logger.error(f"SFTP list_files failed for {target_path}: {e}")
+            raise DataTransferError(f"Failed to list SFTP files: {e}")
+
+    def download_file(self, path: str) -> bytes:
+        self.connect()
+        try:
+            bio = io.BytesIO()
+            self._sftp.getfo(path, bio)
+            return bio.getvalue()
+        except Exception as e:
+            logger.error(f"SFTP download failed for {path}: {e}")
+            raise DataTransferError(f"Failed to download SFTP file: {e}")
+
+    def upload_file(self, path: str, content: bytes) -> bool:
+        self.connect()
+        try:
+            bio = io.BytesIO(content)
+            self._sftp.putfo(bio, path)
+            return True
+        except Exception as e:
+            logger.error(f"SFTP upload failed to {path}: {e}")
+            raise DataTransferError(f"Failed to upload SFTP file: {e}")
+
+    def delete_file(self, path: str) -> bool:
+        self.connect()
+        try:
+            # Check if it's a directory
+            s = self._sftp.stat(path)
+            if stat.S_ISDIR(s.st_mode):
+                self._sftp.rmdir(path)
+            else:
+                self._sftp.remove(path)
+            return True
+        except Exception as e:
+            logger.error(f"SFTP delete failed for {path}: {e}")
+            raise DataTransferError(f"Failed to delete SFTP item: {e}")
+
+    def create_directory(self, path: str) -> bool:
+        self.connect()
+        try:
+            self._sftp.mkdir(path)
+            return True
+        except Exception as e:
+            logger.error(f"SFTP mkdir failed for {path}: {e}")
+            raise DataTransferError(f"Failed to create SFTP directory: {e}")
+
+    def zip_directory(self, path: str) -> bytes:
+        self.connect()
+        import zipfile
+        
+        output_bio = io.BytesIO()
+        try:
+            with zipfile.ZipFile(output_bio, "w", zipfile.ZIP_DEFLATED) as zf:
+                def _recursive_zip(remote_path, zip_path_prefix=""):
+                    for entry in self._sftp.listdir_attr(remote_path):
+                        full_remote_path = os.path.join(remote_path, entry.filename)
+                        current_zip_path = os.path.join(zip_path_prefix, entry.filename)
+                        
+                        if stat.S_ISDIR(entry.st_mode):
+                            _recursive_zip(full_remote_path, current_zip_path)
+                        else:
+                            with self._sftp.file(full_remote_path, 'rb') as f:
+                                zf.writestr(current_zip_path, f.read())
+                
+                _recursive_zip(path)
+            return output_bio.getvalue()
+        except Exception as e:
+            logger.error(f"SFTP zip_directory failed for {path}: {e}")
+            raise DataTransferError(f"Failed to zip SFTP directory: {e}")

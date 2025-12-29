@@ -1,6 +1,5 @@
 from typing import Any, Dict, List, Optional, Iterator, Union
 import os
-import glob
 import pandas as pd
 from datetime import datetime
 from pydantic import Field
@@ -30,8 +29,6 @@ class LocalFileConnector(BaseConnector):
     def validate_config(self):
         try:
             self._config_model = LocalFileConfig.model_validate(self.config)
-            # We don't force create the directory here anymore to avoid Errno 30 on read-only systems
-            # during simple validation/discovery. We only check if it's a valid string.
             if not self._config_model.base_path:
                 raise ValueError("base_path cannot be empty")
         except Exception as e:
@@ -48,7 +45,6 @@ class LocalFileConnector(BaseConnector):
 
     def _get_full_path(self, asset: str) -> str:
         # Prevent path traversal
-        # asset might be fully_qualified_name (relative to base_path) or just filename
         base = os.path.abspath(self._config_model.base_path)
         
         # If asset is already absolute and starts with base, use it
@@ -64,7 +60,10 @@ class LocalFileConnector(BaseConnector):
         return full_path
 
     def discover_assets(
-        self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
+        self,
+        pattern: Optional[str] = None,
+        include_metadata: bool = False,
+        **kwargs
     ) -> List[Dict[str, Any]]:
         base = os.path.abspath(self._config_model.base_path)
         is_recursive = self._config_model.recursive
@@ -112,7 +111,6 @@ class LocalFileConnector(BaseConnector):
                         continue
                 elif max_depth is not None and depth >= max_depth:
                     dirs[:] = []
-                    # We still process files in the current 'root' which is at max_depth
                 
                 for filename in filenames:
                     if len(files) >= max_files:
@@ -130,7 +128,6 @@ class LocalFileConnector(BaseConnector):
                     if pattern and pattern.lower() not in filename.lower() and pattern.lower() not in rel_path.lower():
                         continue
                     
-                    # Basic ignore check (very primitive compared to real pathspec but better than nothing)
                     is_ignored = False
                     for p in ignore_patterns:
                         if p in rel_path or p in filename:
@@ -173,7 +170,6 @@ class LocalFileConnector(BaseConnector):
                 elif "bool" in dtype_str: col_type = "boolean"
                 elif "datetime" in dtype_str: col_type = "datetime"
                 elif "object" in dtype_str:
-                    # check first few non-null values
                     first_val = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
                     if isinstance(first_val, (dict, list)):
                         col_type = "json"
@@ -188,19 +184,22 @@ class LocalFileConnector(BaseConnector):
                 "asset": asset,
                 "columns": columns,
                 "format": asset.split('.')[-1].lower() if '.' in asset else 'unknown',
-                "row_count_estimate": len(df) # this is just sample size
+                "row_count_estimate": len(df)
             }
         except Exception as e:
             raise SchemaDiscoveryError(f"Failed to infer schema for {asset}: {e}")
 
     def read_batch(
-        self, asset: str, limit: Optional[int] = None, offset: Optional[int] = None, **kwargs
+        self,
+        asset: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs
     ) -> Iterator[pd.DataFrame]:
         path = self._get_full_path(asset)
         fmt = asset.split('.')[-1].lower()
         incremental_filter = kwargs.get("incremental_filter")
         
-        # Ensure limit and offset are integers
         limit = int(limit) if limit is not None else None
         offset = int(offset) if offset is not None else 0
         
@@ -210,8 +209,6 @@ class LocalFileConnector(BaseConnector):
         try:
             df_iter: Iterator[pd.DataFrame]
             if fmt == 'csv':
-                # For CSV, we can't easily filter before reading without scanning. 
-                # We read in chunks to manage memory, then filter.
                 chunksize = kwargs.get("chunksize", 10000)
                 skip_rows = range(1, offset + 1) if offset > 0 else None
                 df_iter = pd.read_csv(path, chunksize=chunksize, skiprows=skip_rows)
@@ -220,21 +217,15 @@ class LocalFileConnector(BaseConnector):
                 skip_rows = range(1, offset + 1) if offset > 0 else None
                 df_iter = pd.read_csv(path, sep='\t', chunksize=chunksize, skiprows=skip_rows)
             elif fmt == 'txt':
-                # Read as a single column named 'line'
                 chunksize = kwargs.get("chunksize", 10000)
                 skip_rows = range(offset) if offset > 0 else None
                 df_iter = pd.read_csv(path, sep='\n', header=None, names=['line'], chunksize=chunksize, skiprows=skip_rows)
             elif fmt == 'xml':
-                try:
-                    df = pd.read_xml(path)
-                    df_iter = iter([self.slice_dataframe(df, offset, None)])
-                except ImportError:
-                    raise DataTransferError("XML support requires 'lxml'. Please install it.")
-                except Exception as ex:
-                    raise DataTransferError(f"Failed to read XML: {ex}")
+                df = pd.read_xml(path)
+                df_iter = iter([self.slice_dataframe(df, offset, None)])
             elif fmt == 'parquet':
                 df = pd.read_parquet(path)
-                df_iter = iter([self.slice_dataframe(df, offset, None)]) # Limit handled after filter
+                df_iter = iter([self.slice_dataframe(df, offset, None)])
             elif fmt in ('json', 'jsonl'):
                 df = pd.read_json(path, lines=(fmt == 'jsonl'))
                 df_iter = iter([self.slice_dataframe(df, offset, None)])
@@ -244,19 +235,16 @@ class LocalFileConnector(BaseConnector):
             else:
                 raise DataTransferError(f"Unsupported local file format: {fmt}")
 
-            # Apply Incremental Filter and Limit
             rows_yielded = 0
             for df in df_iter:
                 if incremental_filter and isinstance(incremental_filter, dict):
                     for col, val in incremental_filter.items():
                         if col in df.columns:
-                            # Apply generic "greater than" logic for incremental load
                             df = df[df[col] > val]
                 
                 if df.empty:
                     continue
                 
-                # Apply limit if it was passed (and not handled by read_csv natively for chunks)
                 if limit is not None:
                     remaining = limit - rows_yielded
                     if remaining <= 0:
@@ -271,16 +259,18 @@ class LocalFileConnector(BaseConnector):
             raise DataTransferError(f"Error reading local file {asset}: {e}")
 
     def write_batch(
-        self, data: Union[pd.DataFrame, Iterator[pd.DataFrame]], asset: str, mode: str = "append", **kwargs
+        self,
+        data: Union[pd.DataFrame, Iterator[pd.DataFrame]],
+        asset: str,
+        mode: str = "append",
+        **kwargs
     ) -> int:
         path = self._get_full_path(asset)
         fmt = asset.split('.')[-1].lower()
         
-        # Normalize mode
         clean_mode = mode.lower()
         if clean_mode == "replace": clean_mode = "overwrite"
         
-        # Ensure parent directory exists before writing
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         if isinstance(data, pd.DataFrame):
@@ -294,9 +284,6 @@ class LocalFileConnector(BaseConnector):
             for df in data_iter:
                 if df.empty: continue
                 
-                if clean_mode == "upsert":
-                    logger.warning(f"Upsert requested for file {asset} but not supported. Falling back to append.")
-
                 write_mode = 'w' if (first and clean_mode == 'overwrite') or not os.path.exists(path) else 'a'
                 header = True if write_mode == 'w' or not os.path.exists(path) else False
                 
@@ -305,14 +292,10 @@ class LocalFileConnector(BaseConnector):
                 elif fmt == 'tsv':
                     df.to_csv(path, sep='\t', index=False, mode=write_mode, header=header)
                 elif fmt == 'txt':
-                     # Write first column as lines
                      df.iloc[:, 0].to_csv(path, index=False, header=False, mode=write_mode)
                 elif fmt == 'xml':
-                    if clean_mode == 'append' and os.path.exists(path):
-                         raise DataTransferError("Appending to XML not efficiently supported. Use overwrite.")
                     df.to_xml(path, index=False)
                 elif fmt == 'parquet':
-                    # Parquet doesn't support 'a' mode directly in to_parquet
                     df.to_parquet(path, index=False)
                 elif fmt in ('json', 'jsonl'):
                     df.to_json(path, orient='records', lines=(fmt == 'jsonl'), mode=write_mode)
@@ -331,3 +314,85 @@ class LocalFileConnector(BaseConnector):
         **kwargs,
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError("Query execution is not supported for Local File connector.")
+
+    # --- Live File Management Implementation ---
+
+    def list_files(self, path: str = "") -> List[Dict[str, Any]]:
+        target_path = self._get_full_path(path) if path else os.path.abspath(self._config_model.base_path)
+        results = []
+        try:
+            for entry in os.scandir(target_path):
+                stat_info = entry.stat()
+                results.append({
+                    "name": entry.name,
+                    "path": os.path.relpath(entry.path, os.path.abspath(self._config_model.base_path)),
+                    "type": "directory" if entry.is_dir() else "file",
+                    "size": stat_info.st_size,
+                    "modified_at": stat_info.st_mtime
+                })
+            return results
+        except Exception as e:
+            logger.error(f"Local list_files failed for {target_path}: {e}")
+            raise DataTransferError(f"Failed to list local files: {e}")
+
+    def download_file(self, path: str) -> bytes:
+        full_path = self._get_full_path(path)
+        try:
+            with open(full_path, 'rb') as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"Local download failed for {full_path}: {e}")
+            raise DataTransferError(f"Failed to download local file: {e}")
+
+    def upload_file(self, path: str, content: bytes) -> bool:
+        full_path = self._get_full_path(path)
+        try:
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'wb') as f:
+                f.write(content)
+            return True
+        except Exception as e:
+            logger.error(f"Local upload failed to {full_path}: {e}")
+            raise DataTransferError(f"Failed to upload local file: {e}")
+
+    def delete_file(self, path: str) -> bool:
+        full_path = self._get_full_path(path)
+        try:
+            if os.path.isdir(full_path):
+                import shutil
+                shutil.rmtree(full_path)
+            else:
+                os.remove(full_path)
+            return True
+        except Exception as e:
+            logger.error(f"Local delete failed for {full_path}: {e}")
+            raise DataTransferError(f"Failed to delete local item: {e}")
+
+    def create_directory(self, path: str) -> bool:
+        full_path = self._get_full_path(path)
+        try:
+            os.makedirs(full_path, exist_ok=True)
+            return True
+        except Exception as e:
+            logger.error(f"Local mkdir failed for {full_path}: {e}")
+            raise DataTransferError(f"Failed to create local directory: {e}")
+
+    def zip_directory(self, path: str) -> bytes:
+        full_path = self._get_full_path(path)
+        import zipfile
+        import io
+        
+        output_bio = io.BytesIO()
+        try:
+            with zipfile.ZipFile(output_bio, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, _, files in os.walk(full_path):
+                    for file in files:
+                        file_full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(file_full_path, full_path)
+                        zf.write(file_full_path, rel_path)
+            return output_bio.getvalue()
+        except Exception as e:
+            logger.error(f"Local zip_directory failed for {full_path}: {e}")
+            raise DataTransferError(f"Failed to zip local directory: {e}")
+
+    

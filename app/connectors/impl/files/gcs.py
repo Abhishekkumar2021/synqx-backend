@@ -5,7 +5,7 @@ import pandas as pd
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from app.connectors.base import BaseConnector
-from app.core.errors import ConfigurationError, ConnectionFailedError, SchemaDiscoveryError
+from app.core.errors import ConfigurationError, ConnectionFailedError, SchemaDiscoveryError, DataTransferError
 from app.core.logging import get_logger
 
 try:
@@ -318,3 +318,96 @@ class GCSConnector(BaseConnector):
         **kwargs,
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError("GCS connector does not support direct queries. Use file paths as assets.")
+
+    # --- Live File Management Implementation ---
+
+    def list_files(self, path: str = "") -> List[Dict[str, Any]]:
+        self.connect()
+        # delimiter='/' emulates directory-like behavior
+        # prefix should end with '/' for listing directory contents unless root
+        prefix = path.lstrip('/')
+        if prefix and not prefix.endswith('/'):
+            prefix += '/'
+            
+        try:
+            blobs = self._client.list_blobs(self._config_model.bucket, prefix=prefix, delimiter='/')
+            results = []
+            
+            # prefixes attribute contains "folders"
+            # Accessing list_blobs iterator first to populate prefixes
+            for blob in blobs:
+                # blob is a direct file
+                if blob.name == prefix: # Skip the directory blob itself
+                    continue
+                results.append({
+                    "name": os.path.basename(blob.name),
+                    "path": blob.name,
+                    "type": "file",
+                    "size": blob.size,
+                    "modified_at": blob.updated.timestamp() if blob.updated else None
+                })
+                
+            for folder in blobs.prefixes:
+                results.append({
+                    "name": folder.rstrip('/').split('/')[-1],
+                    "path": folder.rstrip('/'),
+                    "type": "directory",
+                    "size": 0,
+                    "modified_at": None
+                })
+                
+            return results
+        except Exception as e:
+            logger.error(f"GCS list_files failed for {path}: {e}")
+            raise DataTransferError(f"Failed to list GCS files: {e}")
+
+    def download_file(self, path: str) -> bytes:
+        self.connect()
+        try:
+            bucket = self._client.get_bucket(self._config_model.bucket)
+            blob = bucket.blob(path)
+            return blob.download_as_bytes()
+        except Exception as e:
+            logger.error(f"GCS download failed for {path}: {e}")
+            raise DataTransferError(f"Failed to download GCS file: {e}")
+
+    def upload_file(self, path: str, content: bytes) -> bool:
+        self.connect()
+        try:
+            bucket = self._client.get_bucket(self._config_model.bucket)
+            blob = bucket.blob(path)
+            blob.upload_from_string(content, content_type=self._get_content_type(path.split('.')[-1].lower()))
+            return True
+        except Exception as e:
+            logger.error(f"GCS upload failed to {path}: {e}")
+            raise DataTransferError(f"Failed to upload GCS file: {e}")
+
+    def delete_file(self, path: str) -> bool:
+        self.connect()
+        try:
+            bucket = self._client.get_bucket(self._config_model.bucket)
+            # Try to delete as file first
+            blob = bucket.blob(path)
+            if blob.exists():
+                blob.delete()
+            else:
+                # Try to delete as "directory" (delete all blobs with prefix)
+                blobs = bucket.list_blobs(prefix=path + '/')
+                for b in blobs:
+                    b.delete()
+            return True
+        except Exception as e:
+            logger.error(f"GCS delete failed for {path}: {e}")
+            raise DataTransferError(f"Failed to delete GCS item: {e}")
+
+    def create_directory(self, path: str) -> bool:
+        self.connect()
+        # GCS is flat, create a zero-byte placeholder ending in /
+        try:
+            bucket = self._client.get_bucket(self._config_model.bucket)
+            blob = bucket.blob(path.rstrip('/') + '/')
+            blob.upload_from_string('')
+            return True
+        except Exception as e:
+            logger.error(f"GCS mkdir failed for {path}: {e}")
+            raise DataTransferError(f"Failed to create GCS directory: {e}")

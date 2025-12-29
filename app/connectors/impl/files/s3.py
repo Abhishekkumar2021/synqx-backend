@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Union
 import pandas as pd
 import s3fs
@@ -281,11 +282,164 @@ class S3Connector(BaseConnector):
         elif fmt in ('json', 'jsonl'):
             df.to_json(path, orient='records', lines=(fmt == 'jsonl'), storage_options=options)
 
-    def execute_query(
-        self,
-        query: str,
-        limit: Optional[int] = None,
-        offset: Optional[int] = None,
-        **kwargs,
-    ) -> List[Dict[str, Any]]:
-        raise NotImplementedError("Query execution is not supported for S3 connector.")
+        def execute_query(
+
+            self,
+
+            query: str,
+
+            limit: Optional[int] = None,
+
+            offset: Optional[int] = None,
+
+            **kwargs,
+
+        ) -> List[Dict[str, Any]]:
+
+            raise NotImplementedError("Query execution is not supported for S3 connector.")
+
+    
+
+        # --- Live File Management Implementation ---
+
+    
+
+        def list_files(self, path: str = "") -> List[Dict[str, Any]]:
+
+            self.connect()
+
+            # Ensure path is relative to bucket root
+
+            target_path = f"{self._config_model.bucket}/{path.lstrip('/')}"
+
+            results = []
+
+            try:
+
+                # Use detail=True to get size and timestamps
+
+                items = self._fs.ls(target_path, detail=True)
+
+                for item in items:
+
+                    name = os.path.basename(item['name'])
+
+                    if not name: # Handle bucket root case where basename is empty
+
+                        continue
+
+                    
+
+                    results.append({
+
+                        "name": name,
+
+                        "path": item['name'].replace(f"{self._config_model.bucket}/", ""),
+
+                        "type": "directory" if item['type'] == 'directory' else "file",
+
+                        "size": item.get('size', 0),
+
+                        "modified_at": item.get('LastModified').timestamp() if isinstance(item.get('LastModified'), datetime) else None
+
+                    })
+
+                return results
+
+            except Exception as e:
+
+                logger.error(f"S3 list_files failed for {target_path}: {e}")
+
+                raise DataTransferError(f"Failed to list S3 files: {e}")
+
+    
+
+        def download_file(self, path: str) -> bytes:
+
+            self.connect()
+
+            full_path = f"{self._config_model.bucket}/{path.lstrip('/')}"
+
+            try:
+
+                with self._fs.open(full_path, 'rb') as f:
+
+                    return f.read()
+
+            except Exception as e:
+
+                logger.error(f"S3 download failed for {full_path}: {e}")
+
+                raise DataTransferError(f"Failed to download S3 file: {e}")
+
+    
+
+        def upload_file(self, path: str, content: bytes) -> bool:
+
+            self.connect()
+
+            full_path = f"{self._config_model.bucket}/{path.lstrip('/')}"
+
+            try:
+
+                with self._fs.open(full_path, 'wb') as f:
+
+                    f.write(content)
+
+                return True
+
+            except Exception as e:
+
+                logger.error(f"S3 upload failed to {full_path}: {e}")
+
+                raise DataTransferError(f"Failed to upload S3 file: {e}")
+
+    
+
+        def delete_file(self, path: str) -> bool:
+
+            self.connect()
+
+            full_path = f"{self._config_model.bucket}/{path.lstrip('/')}"
+
+            try:
+
+                if self._fs.isdir(full_path):
+
+                    self._fs.rm(full_path, recursive=True)
+
+                else:
+
+                    self._fs.rm(full_path)
+
+                return True
+
+            except Exception as e:
+
+                logger.error(f"S3 delete failed for {full_path}: {e}")
+
+                raise DataTransferError(f"Failed to delete S3 item: {e}")
+
+    
+
+        def create_directory(self, path: str) -> bool:
+
+            self.connect()
+
+            # S3 doesn't have real directories, but we can create a placeholder file
+
+            full_path = f"{self._config_model.bucket}/{path.lstrip('/')}/.keep"
+
+            try:
+
+                self._fs.touch(full_path)
+
+                return True
+
+            except Exception as e:
+
+                logger.error(f"S3 mkdir failed for {full_path}: {e}")
+
+                raise DataTransferError(f"Failed to create S3 placeholder: {e}")
+
+    

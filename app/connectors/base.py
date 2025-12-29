@@ -116,6 +116,32 @@ class BaseConnector(ABC):
     ) -> List[Dict[str, Any]]:
         pass
 
+    # --- Live File Management (WinSCP-like features) ---
+    
+    def list_files(self, path: str = "") -> List[Dict[str, Any]]:
+        """List files and directories at the given path in real-time."""
+        raise NotImplementedError(f"Live file listing not supported for {self.__class__.__name__}")
+
+    def download_file(self, path: str) -> bytes:
+        """Download a file's content as bytes."""
+        raise NotImplementedError(f"File download not supported for {self.__class__.__name__}")
+
+    def upload_file(self, path: str, content: bytes) -> bool:
+        """Upload content to a file at the given path."""
+        raise NotImplementedError(f"File upload not supported for {self.__class__.__name__}")
+
+    def delete_file(self, path: str) -> bool:
+        """Delete a file or directory at the given path."""
+        raise NotImplementedError(f"File deletion not supported for {self.__class__.__name__}")
+
+    def create_directory(self, path: str) -> bool:
+        """Create a new directory at the given path."""
+        raise NotImplementedError(f"Directory creation not supported for {self.__class__.__name__}")
+
+    def zip_directory(self, path: str) -> bytes:
+        """Compress a directory and its contents into a ZIP file and return as bytes."""
+        raise NotImplementedError(f"Directory zipping not supported for {self.__class__.__name__}")
+
     @staticmethod
     def slice_dataframe(df: pd.DataFrame, offset: Optional[int], limit: Optional[int]):
         if offset is not None:

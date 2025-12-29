@@ -5,7 +5,7 @@ import pandas as pd
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from app.connectors.base import BaseConnector
-from app.core.errors import ConfigurationError, ConnectionFailedError, SchemaDiscoveryError
+from app.core.errors import ConfigurationError, ConnectionFailedError, SchemaDiscoveryError, DataTransferError
 from app.core.logging import get_logger
 
 try:
@@ -78,14 +78,17 @@ class AzureBlobConnector(BaseConnector):
             return False
 
     def discover_assets(
-        self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
+        self,
+        pattern: Optional[str] = None,
+        include_metadata: bool = False,
+        **kwargs
     ) -> List[Dict[str, Any]]:
         self.connect()
         assets = []
         prefix = kwargs.get("prefix")
         blobs = self._container_client.list_blobs(name_starts_with=prefix)
         
-        valid_extensions = {".csv", ".tsv", ".txt", ".xml", ".json", ".parquet", ".jsonl", ".avro", ".xls", ".xlsx"}
+        valid_extensions = {'.csv', '.tsv', '.txt', '.xml', '.json', '.parquet', '.jsonl', '.avro', '.xls', '.xlsx'}
         is_recursive = self._config_model.recursive
         max_depth = self._config_model.max_depth
         max_assets = 10000
@@ -99,7 +102,6 @@ class AzureBlobConnector(BaseConnector):
                 logger.warning(f"Reached max discovery limit of {max_assets} assets for container {self._config_model.container_name}")
                 break
 
-            # Depth check
             rel_name = blob.name[len(prefix):] if prefix else blob.name
             depth = len(rel_name.lstrip('/').split('/')) - 1
             if max_depth is not None and depth > max_depth:
@@ -108,11 +110,9 @@ class AzureBlobConnector(BaseConnector):
             if pattern and pattern not in blob.name:
                 continue
             
-            # Exclude check
             if any(ig in blob.name for ig in ignored):
                 continue
 
-            # If not recursive, ignore blobs in "subfolders"
             if not is_recursive:
                 rel_path = blob.name[len(prefix):] if prefix else blob.name
                 if "/" in rel_path.lstrip("/"):
@@ -180,9 +180,6 @@ class AzureBlobConnector(BaseConnector):
     ) -> Iterator[pd.DataFrame]:
         self.connect()
         blob_client = self._container_client.get_blob_client(asset)
-        
-        # Download fully for now (simplest for prototyping)
-        # For production, use smart streaming or Azure's chunked download
         download_stream = blob_client.download_blob()
         data = download_stream.readall()
         bio = io.BytesIO(data)
@@ -290,8 +287,108 @@ class AzureBlobConnector(BaseConnector):
         elif ext == ".jsonl": df.to_json(bio, orient="records", lines=True)
         
         bio.seek(0)
-        blob_client.upload_blob(bio, overwrite=True) # Azure Blob append is complex, defaulting to overwrite/replace
+        blob_client.upload_blob(bio, overwrite=True)
         return len(df)
 
-    def execute_query(self, query: str, **kwargs) -> List[Dict[str, Any]]:
-        raise NotImplementedError("Azure Blob connector does not support direct queries.")
+    def execute_query(
+        self,
+        query: str,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError("Query execution is not supported for Azure Blob connector.")
+
+    # --- Live File Management Implementation ---
+
+    def list_files(self, path: str = "") -> List[Dict[str, Any]]:
+        self.connect()
+        prefix = path.lstrip('/')
+        if prefix and not prefix.endswith('/'):
+            prefix += '/'
+            
+        try:
+            # list_blobs with name_starts_with and delimiter to emulate directories
+            blobs = self._container_client.list_blobs(name_starts_with=prefix)
+            results = []
+            seen_dirs = set()
+            
+            for blob in blobs:
+                # Get the relative name within the current "directory"
+                rel_name = blob.name[len(prefix):]
+                if not rel_name:
+                    continue
+                
+                parts = rel_name.split('/')
+                if len(parts) > 1:
+                    # It's in a subdirectory
+                    dir_name = parts[0]
+                    if dir_name not in seen_dirs:
+                        results.append({
+                            "name": dir_name,
+                            "path": prefix + dir_name,
+                            "type": "directory",
+                            "size": 0,
+                            "modified_at": None
+                        })
+                        seen_dirs.add(dir_name)
+                else:
+                    # It's a file in the current directory
+                    results.append({
+                        "name": parts[0],
+                        "path": blob.name,
+                        "type": "file",
+                        "size": blob.size,
+                        "modified_at": blob.last_modified.timestamp() if blob.last_modified else None
+                    })
+            return results
+        except Exception as e:
+            logger.error(f"Azure list_files failed for {path}: {e}")
+            raise DataTransferError(f"Failed to list Azure blobs: {e}")
+
+    def download_file(self, path: str) -> bytes:
+        self.connect()
+        try:
+            blob_client = self._container_client.get_blob_client(path)
+            return blob_client.download_blob().readall()
+        except Exception as e:
+            logger.error(f"Azure download failed for {path}: {e}")
+            raise DataTransferError(f"Failed to download Azure blob: {e}")
+
+    def upload_file(self, path: str, content: bytes) -> bool:
+        self.connect()
+        try:
+            blob_client = self._container_client.get_blob_client(path)
+            blob_client.upload_blob(content, overwrite=True)
+            return True
+        except Exception as e:
+            logger.error(f"Azure upload failed to {path}: {e}")
+            raise DataTransferError(f"Failed to upload Azure blob: {e}")
+
+    def delete_file(self, path: str) -> bool:
+        self.connect()
+        try:
+            # Check if it's a "directory" by listing with prefix
+            blobs = list(self._container_client.list_blobs(name_starts_with=path))
+            if len(blobs) > 1 or (len(blobs) == 1 and blobs[0].name != path):
+                # Delete all blobs with this prefix
+                for blob in blobs:
+                    self._container_client.delete_blob(blob.name)
+            else:
+                # Delete single blob
+                self._container_client.delete_blob(path)
+            return True
+        except Exception as e:
+            logger.error(f"Azure delete failed for {path}: {e}")
+            raise DataTransferError(f"Failed to delete Azure blob: {e}")
+
+    def create_directory(self, path: str) -> bool:
+        self.connect()
+        # Azure is flat, create a zero-byte placeholder ending in /
+        try:
+            blob_client = self._container_client.get_blob_client(path.rstrip('/') + '/')
+            blob_client.upload_blob(b'', overwrite=True)
+            return True
+        except Exception as e:
+            logger.error(f"Azure mkdir failed for {path}: {e}")
+            raise DataTransferError(f"Failed to create Azure placeholder: {e}")
