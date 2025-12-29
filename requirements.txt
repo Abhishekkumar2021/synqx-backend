@@ -28,32 +28,24 @@ s3fs
 # Task Queue (keeping Celery as alternative to Prefect)
 celery
 flower
-kombu
 
 # Security & Encryption
 cryptography
 python-multipart
-passlib[bcrypt]
 python-jose[cryptography]
 bcrypt
 
-
 # Data Processing
 pandas
-polars
 pyarrow
 duckdb
 
-# Singer Protocol (Meltano-style connectors)
-singer-python
-
 # Workflow Orchestration
-prefect
+# prefect removed (using Celery)
 
 # Utilities
 python-dotenv
 httpx
-websockets
 structlog
 croniter
 psutil
@@ -67,19 +59,15 @@ mypy
 
 # File Format Support
 fastparquet
-fastavro
-openpyxl
-xlrd
 
-# Other
-numpyelasticsearch
+# Connectors
+elasticsearch
 google-cloud-storage
-azure-storage-blob>=12.0.0
-paramiko>=3.0.0
-kafka-python>=2.0.0
-boto3>=1.20.0
-databricks-sql-connector>=2.0.0
-pika>=1.3.0
-cassandra-driver>=3.25.0
-pyairtable>=2.0.0
-simple-salesforce>=1.12.0
+azure-storage-blob
+paramiko
+kafka-python
+databricks-sql-connector
+pika
+cassandra-driver
+pyairtable
+simple-salesforce
