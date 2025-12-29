@@ -71,3 +71,4 @@ pika
 cassandra-driver
 pyairtable
 simple-salesforce
+lxml

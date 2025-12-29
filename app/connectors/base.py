@@ -118,10 +118,10 @@ class BaseConnector(ABC):
 
     @staticmethod
     def slice_dataframe(df: pd.DataFrame, offset: Optional[int], limit: Optional[int]):
-        if offset:
-            df = df.iloc[offset:]
-        if limit:
-            df = df.iloc[:limit]
+        if offset is not None:
+            df = df.iloc[int(offset):]
+        if limit is not None:
+            df = df.iloc[:int(limit)]
         return df
 
     @staticmethod

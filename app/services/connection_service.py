@@ -565,7 +565,7 @@ class ConnectionService:
             with connector.session() as session:
                 discovered = session.discover_assets(
                     pattern=pattern,
-                    include_metadata=include_metadata, 
+                    include_metadata=include_metadata
                 )
 
             connection.last_schema_discovery_at = datetime.now(timezone.utc)
@@ -710,7 +710,7 @@ class ConnectionService:
 
         pipeline_count = pipeline_count_query.scalar()
 
-        return ConnectionImpactRead(pipeline_count=pipeline_count or 0)
+        return ConnectionImpactRead(pipeline_count=int(pipeline_count or 0))
 
     def get_connection_usage_stats(self, connection_id: int, user_id: Optional[int] = None) -> ConnectionUsageStatsRead:
         # Validate connection exists and user has access
@@ -764,9 +764,9 @@ class ConnectionService:
         data_extracted_gb_24h = 0.0 # Placeholder
 
         return ConnectionUsageStatsRead(
-            sync_success_rate=round(sync_success_rate, 2),
-            average_latency_ms=round(average_latency_ms, 2) if average_latency_ms is not None else None,
-            data_extracted_gb_24h=data_extracted_gb_24h,
-            last_24h_runs=total_runs_24h,
-            last_7d_runs=last_7d_runs_count or 0
+            sync_success_rate=round(float(sync_success_rate), 2),
+            average_latency_ms=round(float(average_latency_ms), 2) if average_latency_ms is not None else None,
+            data_extracted_gb_24h=float(data_extracted_gb_24h),
+            last_24h_runs=int(total_runs_24h),
+            last_7d_runs=int(last_7d_runs_count or 0)
         )

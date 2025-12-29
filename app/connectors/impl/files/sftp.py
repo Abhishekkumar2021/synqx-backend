@@ -6,7 +6,7 @@ import pandas as pd
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from app.connectors.base import BaseConnector
-from app.core.errors import ConfigurationError, ConnectionFailedError, DataTransferError
+from app.core.errors import ConfigurationError, ConnectionFailedError, SchemaDiscoveryError
 from app.core.logging import get_logger
 
 try:
@@ -26,6 +26,9 @@ class SFTPConfig(BaseSettings):
     private_key: Optional[str] = Field(None, description="Private Key (PEM format)")
     private_key_passphrase: Optional[str] = Field(None, description="Passphrase for Private Key")
     base_path: str = Field("/", description="Base path to search for files")
+    recursive: bool = Field(True, description="Recursively search for files")
+    max_depth: Optional[int] = Field(None, ge=0, description="Maximum depth for recursion")
+    exclude_patterns: Optional[str] = Field(None, description="Comma-separated list of folders/files to exclude")
 
 class SFTPConnector(BaseConnector):
     def __init__(self, config: Dict[str, Any]):
@@ -96,21 +99,44 @@ class SFTPConnector(BaseConnector):
         self.connect()
         assets = []
         base = self._config_model.base_path
+        is_recursive = self._config_model.recursive
+        max_depth = self._config_model.max_depth
+        valid_extensions = {".csv", ".tsv", ".txt", ".xml", ".json", ".parquet", ".jsonl", ".avro", ".xls", ".xlsx"}
+        max_assets = 10000
         
+        ignored = {'.git', 'node_modules', '__pycache__', '.venv', 'venv'}
+        if self._config_model.exclude_patterns:
+            ignored.update({p.strip() for p in self._config_model.exclude_patterns.split(',') if p.strip()})
+
         # Recursive function to walk directories
-        def walk_sftp(path):
+        def walk_sftp(path, depth=0):
+            if len(assets) >= max_assets:
+                return
+
+            # Depth limit check
+            if max_depth is not None and depth > max_depth:
+                return
+
             try:
                 for entry in self._sftp.listdir_attr(path):
+                    if len(assets) >= max_assets:
+                        break
+
                     remote_path = os.path.join(path, entry.filename)
+                    
+                    # Exclude check
+                    if any(ig in remote_path for ig in ignored):
+                        continue
+
                     if stat.S_ISDIR(entry.st_mode):
-                        # simple recursion prevention depth check omitted for brevity
-                        walk_sftp(remote_path)
+                        if is_recursive:
+                            walk_sftp(remote_path, depth + 1)
                     else:
                         if pattern and pattern not in entry.filename:
                             continue
                         
                         ext = os.path.splitext(entry.filename)[1].lower()
-                        if ext in [".csv", ".json", ".parquet", ".jsonl"]:
+                        if ext in valid_extensions:
                             asset = {
                                 "name": entry.filename,
                                 "fully_qualified_name": remote_path,
@@ -129,44 +155,41 @@ class SFTPConnector(BaseConnector):
         walk_sftp(base)
         return assets
 
-    def infer_schema(self, asset: str, **kwargs) -> Dict[str, Any]:
+    def infer_schema(self, asset: str, sample_size: int = 1000, **kwargs) -> Dict[str, Any]:
         self.connect()
         try:
-            # Read first chunk
-            with self._sftp.file(asset, mode='rb') as f:
-                # Read 1MB
-                head = f.read(1024 * 1024)
-                
-            ext = os.path.splitext(asset)[1].lower()
-            bio = io.BytesIO(head)
+            df_iter = self.read_batch(asset, limit=sample_size)
+            df = next(df_iter)
             
-            if ext == ".csv":
-                df = pd.read_csv(bio, nrows=100)
-            elif ext == ".parquet":
-                df = pd.read_parquet(bio)
-            elif ext in [".json", ".jsonl"]:
-                df = pd.read_json(bio, lines=(ext == ".jsonl"), nrows=100 if ext == ".jsonl" else None)
-            else:
-                return {"asset": asset, "columns": [], "type": "file"}
-
             columns = []
-            for col in df.columns:
-                dtype = str(df[col].dtype)
+            for col, dtype in df.dtypes.items():
                 col_type = "string"
-                if "int" in dtype: col_type = "integer"
-                elif "float" in dtype: col_type = "float"
-                elif "bool" in dtype: col_type = "boolean"
-                elif "datetime" in dtype: col_type = "datetime"
-                columns.append({"name": col, "type": col_type, "native_type": dtype})
-            
+                dtype_str = str(dtype).lower()
+                
+                if "int" in dtype_str: col_type = "integer"
+                elif "float" in dtype_str or "double" in dtype_str: col_type = "float"
+                elif "bool" in dtype_str: col_type = "boolean"
+                elif "datetime" in dtype_str: col_type = "datetime"
+                elif "object" in dtype_str:
+                    first_val = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
+                    if isinstance(first_val, (dict, list)):
+                        col_type = "json"
+                
+                columns.append({
+                    "name": col,
+                    "type": col_type,
+                    "native_type": str(dtype)
+                })
+
             return {
                 "asset": asset,
                 "columns": columns,
-                "type": "file"
+                "format": asset.split('.')[-1].lower() if '.' in asset else 'unknown',
+                "row_count_estimate": len(df)
             }
         except Exception as e:
             logger.error(f"Schema inference failed for SFTP file {asset}: {e}")
-            return {"asset": asset, "columns": [], "type": "file"}
+            raise SchemaDiscoveryError(f"SFTP schema inference failed for {asset}: {e}")
 
     def read_batch(
         self,
@@ -195,40 +218,72 @@ class SFTPConnector(BaseConnector):
                 reader = pd.read_csv(f, chunksize=chunksize)
                 rows = 0
                 for df in reader:
-                    if limit and rows + len(df) > limit:
-                        yield df.iloc[:limit - rows]
-                        break
+                    if limit is not None:
+                        remaining = limit - rows
+                        if remaining <= 0:
+                            break
+                        if len(df) > remaining:
+                            df = df.iloc[:int(remaining)]
                     yield df
                     rows += len(df)
-                    if limit and rows >= limit: break
+                    if limit is not None and rows >= limit: break
             
-            elif ext == ".parquet":
-                # Parquet engines usually need a seekable file or whole file
-                # Reading whole content to BytesIO for compatibility
+            elif ext == ".tsv":
+                reader = pd.read_csv(f, sep='\t', chunksize=chunksize)
+                rows = 0
+                for df in reader:
+                    if limit is not None:
+                        remaining = limit - rows
+                        if remaining <= 0:
+                            break
+                        if len(df) > remaining:
+                            df = df.iloc[:int(remaining)]
+                    yield df
+                    rows += len(df)
+                    if limit is not None and rows >= limit: break
+
+            elif ext == ".txt":
+                reader = pd.read_csv(f, sep='\n', header=None, names=['line'], chunksize=chunksize)
+                rows = 0
+                for df in reader:
+                    if limit is not None:
+                        remaining = limit - rows
+                        if remaining <= 0:
+                            break
+                        if len(df) > remaining:
+                            df = df.iloc[:int(remaining)]
+                    yield df
+                    rows += len(df)
+                    if limit is not None and rows >= limit: break
+
+            elif ext in (".xml", ".xls", ".xlsx", ".parquet", ".json"):
+                # These formats usually require a seekable stream or full file
                 bio = io.BytesIO(f.read())
-                df = pd.read_parquet(bio)
-                if offset: df = df.iloc[offset:]
-                if limit: df = df.iloc[:limit]
+                if ext == ".xml":
+                    df = pd.read_xml(bio)
+                elif ext in (".xls", ".xlsx"):
+                    df = pd.read_excel(bio)
+                elif ext == ".parquet":
+                    df = pd.read_parquet(bio)
+                elif ext == ".json":
+                    df = pd.read_json(bio)
+                
+                df = self.slice_dataframe(df, offset, limit)
                 yield df
             
             elif ext == ".jsonl":
                 reader = pd.read_json(f, lines=True, chunksize=chunksize)
                 rows = 0
                 for df in reader:
-                    if limit and rows + len(df) > limit:
-                        yield df.iloc[:limit - rows]
-                        break
+                    if limit is not None:
+                        remaining = limit - rows
+                        if remaining <= 0:
+                            break
+                        if len(df) > remaining:
+                            df = df.iloc[:int(remaining)]
                     yield df
                     rows += len(df)
                     if limit and rows >= limit: break
-            
-            elif ext == ".json":
-                # JSON usually requires whole file
-                bio = io.BytesIO(f.read())
-                df = pd.read_json(bio)
-                if offset: df = df.iloc[offset:]
-                if limit: df = df.iloc[:limit]
-                yield df
 
     def write_batch(
         self,

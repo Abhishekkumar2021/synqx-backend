@@ -18,6 +18,9 @@ class S3Config(BaseSettings):
     aws_access_key_id: Optional[str] = Field(None, description="AWS Access Key ID")
     aws_secret_access_key: Optional[str] = Field(None, description="AWS Secret Access Key")
     endpoint_url: Optional[str] = Field(None, description="Custom Endpoint URL (e.g. for MinIO)")
+    recursive: bool = Field(True, description="Recursively search for files")
+    max_depth: Optional[int] = Field(None, ge=0, description="Maximum depth for recursion")
+    exclude_patterns: Optional[str] = Field(None, description="Comma-separated list of folders/files to exclude")
 
 class S3Connector(BaseConnector):
     """
@@ -73,14 +76,40 @@ class S3Connector(BaseConnector):
     ) -> List[Dict[str, Any]]:
         self.connect()
         try:
+            is_recursive = self._config_model.recursive
+            max_depth = self._config_model.max_depth
+
             # Recursive listing with optimized filter
-            files = self._fs.glob(f"{self._config_model.bucket}/**")
-            valid_extensions = ('.csv', '.parquet', '.json', '.jsonl', '.avro')
+            glob_pattern = f"{self._config_model.bucket}/**" if is_recursive else f"{self._config_model.bucket}/*"
+            files = self._fs.glob(glob_pattern)
+            valid_extensions = ('.csv', '.tsv', '.txt', '.xml', '.parquet', '.json', '.jsonl', '.avro', '.xls', '.xlsx')
             
+            ignored = {'.git', 'node_modules', '__pycache__', '.venv', 'venv'}
+            if self._config_model.exclude_patterns:
+                ignored.update({p.strip() for p in self._config_model.exclude_patterns.split(',') if p.strip()})
+
             assets = []
+            max_assets = 10000
+
             for f in files:
-                if f.endswith(valid_extensions):
+                if len(assets) >= max_assets:
+                    logger.warning(f"Reached max discovery limit of {max_assets} assets for bucket {self._config_model.bucket}")
+                    break
+
+                if f.lower().endswith(valid_extensions):
                     rel_path = f.replace(f"{self._config_model.bucket}/", "")
+                    
+                    # Depth check
+                    if max_depth is not None:
+                        # count '/' in rel_path to determine depth
+                        depth = len(rel_path.split('/')) - 1
+                        if depth > max_depth:
+                            continue
+
+                    # Exclude check
+                    if any(ig in rel_path for ig in ignored):
+                        continue
+
                     if pattern and pattern.lower() not in rel_path.lower():
                         continue
                     
@@ -106,11 +135,33 @@ class S3Connector(BaseConnector):
         self.connect()
         try:
             df_iter = self.read_batch(asset, limit=sample_size)
-            sample_df = next(df_iter)
+            df = next(df_iter)
+            
+            columns = []
+            for col, dtype in df.dtypes.items():
+                col_type = "string"
+                dtype_str = str(dtype).lower()
+                
+                if "int" in dtype_str: col_type = "integer"
+                elif "float" in dtype_str or "double" in dtype_str: col_type = "float"
+                elif "bool" in dtype_str: col_type = "boolean"
+                elif "datetime" in dtype_str: col_type = "datetime"
+                elif "object" in dtype_str:
+                    first_val = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
+                    if isinstance(first_val, (dict, list)):
+                        col_type = "json"
+                
+                columns.append({
+                    "name": col,
+                    "type": col_type,
+                    "native_type": str(dtype)
+                })
+
             return {
                 "asset": asset,
-                "columns": [{"name": col, "type": str(dtype)} for col, dtype in sample_df.dtypes.items()],
-                "format": asset.split('.')[-1]
+                "columns": columns,
+                "format": asset.split('.')[-1].lower() if '.' in asset else 'unknown',
+                "row_count_estimate": len(df)
             }
         except Exception as e:
             raise SchemaDiscoveryError(f"S3 schema inference failed for {asset}: {e}")
@@ -123,6 +174,10 @@ class S3Connector(BaseConnector):
         fmt = asset.split('.')[-1].lower()
         incremental_filter = kwargs.get("incremental_filter")
         
+        # Ensure limit and offset are integers
+        limit = int(limit) if limit is not None else None
+        offset = int(offset) if offset is not None else 0
+
         storage_options = {
             "key": self._config_model.aws_access_key_id,
             "secret": self._config_model.aws_secret_access_key,
@@ -134,7 +189,22 @@ class S3Connector(BaseConnector):
             if fmt == 'csv':
                 # Read in chunks to support filtering without OOM
                 chunksize = kwargs.get("chunksize", 10000)
-                df_iter = pd.read_csv(path, storage_options=storage_options, chunksize=chunksize, skiprows=range(1, offset + 1) if offset else None)
+                skip_rows = range(1, offset + 1) if offset > 0 else None
+                df_iter = pd.read_csv(path, storage_options=storage_options, chunksize=chunksize, skiprows=skip_rows)
+            elif fmt == 'tsv':
+                chunksize = kwargs.get("chunksize", 10000)
+                skip_rows = range(1, offset + 1) if offset > 0 else None
+                df_iter = pd.read_csv(path, storage_options=storage_options, sep='\t', chunksize=chunksize, skiprows=skip_rows)
+            elif fmt == 'txt':
+                chunksize = kwargs.get("chunksize", 10000)
+                skip_rows = range(offset) if offset > 0 else None
+                df_iter = pd.read_csv(path, storage_options=storage_options, sep='\n', header=None, names=['line'], chunksize=chunksize, skiprows=skip_rows)
+            elif fmt == 'xml':
+                df = pd.read_xml(path, storage_options=storage_options)
+                df_iter = iter([self.slice_dataframe(df, offset, None)])
+            elif fmt in ('xls', 'xlsx'):
+                df = pd.read_excel(path, storage_options=storage_options)
+                df_iter = iter([self.slice_dataframe(df, offset, None)])
             elif fmt == 'parquet':
                 df = pd.read_parquet(path, storage_options=storage_options)
                 df_iter = iter([self.slice_dataframe(df, offset, None)])
@@ -156,12 +226,12 @@ class S3Connector(BaseConnector):
                     continue
 
                 # Apply limit
-                if limit:
+                if limit is not None:
                     remaining = limit - rows_yielded
                     if remaining <= 0:
                         break
                     if len(df) > remaining:
-                        df = df.iloc[:remaining]
+                        df = df.iloc[:int(remaining)]
                 
                 rows_yielded += len(df)
                 yield df

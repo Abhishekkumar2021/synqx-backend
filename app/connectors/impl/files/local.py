@@ -14,6 +14,9 @@ logger = get_logger(__name__)
 class LocalFileConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
     base_path: str = Field(..., description="Base directory for files")
+    recursive: bool = Field(True, description="Recursively search for files")
+    max_depth: Optional[int] = Field(None, ge=0, description="Maximum depth for recursion (None for unlimited)")
+    exclude_patterns: Optional[str] = Field(None, description="Comma-separated list of folders/files to exclude")
 
 class LocalFileConnector(BaseConnector):
     """
@@ -45,51 +48,147 @@ class LocalFileConnector(BaseConnector):
 
     def _get_full_path(self, asset: str) -> str:
         # Prevent path traversal
-        clean_asset = os.path.basename(asset) if "/" not in asset else asset
-        path = os.path.join(self._config_model.base_path, clean_asset)
-        return os.path.abspath(path)
+        # asset might be fully_qualified_name (relative to base_path) or just filename
+        base = os.path.abspath(self._config_model.base_path)
+        
+        # If asset is already absolute and starts with base, use it
+        if os.path.isabs(asset) and asset.startswith(base):
+            return os.path.abspath(asset)
+            
+        path = os.path.join(base, asset)
+        full_path = os.path.abspath(path)
+        
+        if not full_path.startswith(base):
+            raise ValueError(f"Access denied: Path {full_path} is outside base directory {base}")
+            
+        return full_path
 
     def discover_assets(
         self, pattern: Optional[str] = None, include_metadata: bool = False, **kwargs
     ) -> List[Dict[str, Any]]:
-        base = self._config_model.base_path
-        search_pattern = pattern or "*"
+        base = os.path.abspath(self._config_model.base_path)
+        is_recursive = self._config_model.recursive
+        max_depth = self._config_model.max_depth
         
-        # Use glob for discovery
+        valid_extensions = {'.csv', '.tsv', '.txt', '.xml', '.parquet', '.json', '.jsonl', '.xls', '.xlsx'}
+        
+        # Default ignored directories
+        ignored_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.ruff_cache', '.pytest_cache', '.DS_Store'}
+        
+        # Add user-defined exclusions
+        if self._config_model.exclude_patterns:
+            user_excludes = {p.strip() for p in self._config_model.exclude_patterns.split(',') if p.strip()}
+            ignored_dirs.update(user_excludes)
+        
+        # Basic .gitignore handling
+        ignore_patterns = list(ignored_dirs)
+        gitignore_path = os.path.join(base, '.gitignore')
+        if os.path.exists(gitignore_path):
+            try:
+                with open(gitignore_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            ignore_patterns.append(line)
+            except Exception as e:
+                logger.warning(f"Failed to read .gitignore at {base}: {e}")
+
         files = []
+        max_files = 10000 # Safety limit
+        
         try:
-            full_pattern = os.path.join(base, search_pattern)
-            for f in glob.glob(full_pattern, recursive=True):
-                if os.path.isfile(f):
-                    rel_path = os.path.relpath(f, base)
-                    if not include_metadata:
-                        files.append({
-                            "name": os.path.basename(f), 
-                            "fully_qualified_name": rel_path,
-                            "type": "file"
-                        })
-                    else:
-                        stat = os.stat(f)
-                        files.append({
-                            "name": os.path.basename(f),
-                            "fully_qualified_name": rel_path,
-                            "type": "file",
+            for root, dirs, filenames in os.walk(base, topdown=True):
+                # Calculate current depth relative to base
+                rel_root = os.path.relpath(root, base)
+                depth = 0 if rel_root == "." else len(rel_root.split(os.sep))
+
+                # Prune ignored directories in-place
+                dirs[:] = [d for d in dirs if d not in ignored_dirs]
+                
+                # Check if we should stop recursion based on depth or recursive flag
+                if not is_recursive:
+                    if os.path.abspath(root) != base:
+                        dirs[:] = []
+                        continue
+                elif max_depth is not None and depth >= max_depth:
+                    dirs[:] = []
+                    # We still process files in the current 'root' which is at max_depth
+                
+                for filename in filenames:
+                    if len(files) >= max_files:
+                        logger.warning(f"Reached max discovery limit of {max_files} assets for {base}")
+                        return files
+
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext not in valid_extensions:
+                        continue
+
+                    full_path = os.path.join(root, filename)
+                    rel_path = os.path.relpath(full_path, base)
+
+                    # Simple pattern matching for asset discovery
+                    if pattern and pattern.lower() not in filename.lower() and pattern.lower() not in rel_path.lower():
+                        continue
+                    
+                    # Basic ignore check (very primitive compared to real pathspec but better than nothing)
+                    is_ignored = False
+                    for p in ignore_patterns:
+                        if p in rel_path or p in filename:
+                            is_ignored = True
+                            break
+                    if is_ignored:
+                        continue
+
+                    asset = {
+                        "name": filename,
+                        "fully_qualified_name": rel_path,
+                        "type": "file"
+                    }
+                    
+                    if include_metadata:
+                        stat = os.stat(full_path)
+                        asset.update({
                             "size_bytes": stat.st_size,
                             "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                            "format": rel_path.split('.')[-1] if '.' in rel_path else 'unknown'
+                            "format": ext.replace('.', '')
                         })
+                    
+                    files.append(asset)
             return files
         except Exception as e:
-            raise DataTransferError(f"Failed to discover local files: {e}")
+            raise DataTransferError(f"Failed to discover local files at {base}: {e}")
 
     def infer_schema(self, asset: str, sample_size: int = 1000, **kwargs) -> Dict[str, Any]:
         try:
             df_iter = self.read_batch(asset, limit=sample_size)
             df = next(df_iter)
+            
+            columns = []
+            for col, dtype in df.dtypes.items():
+                col_type = "string"
+                dtype_str = str(dtype).lower()
+                
+                if "int" in dtype_str: col_type = "integer"
+                elif "float" in dtype_str or "double" in dtype_str: col_type = "float"
+                elif "bool" in dtype_str: col_type = "boolean"
+                elif "datetime" in dtype_str: col_type = "datetime"
+                elif "object" in dtype_str:
+                    # check first few non-null values
+                    first_val = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
+                    if isinstance(first_val, (dict, list)):
+                        col_type = "json"
+                
+                columns.append({
+                    "name": col,
+                    "type": col_type,
+                    "native_type": str(dtype)
+                })
+
             return {
                 "asset": asset,
-                "columns": [{"name": col, "type": str(dtype)} for col, dtype in df.dtypes.items()],
-                "format": asset.split('.')[-1]
+                "columns": columns,
+                "format": asset.split('.')[-1].lower() if '.' in asset else 'unknown',
+                "row_count_estimate": len(df) # this is just sample size
             }
         except Exception as e:
             raise SchemaDiscoveryError(f"Failed to infer schema for {asset}: {e}")
@@ -101,6 +200,10 @@ class LocalFileConnector(BaseConnector):
         fmt = asset.split('.')[-1].lower()
         incremental_filter = kwargs.get("incremental_filter")
         
+        # Ensure limit and offset are integers
+        limit = int(limit) if limit is not None else None
+        offset = int(offset) if offset is not None else 0
+        
         if not os.path.exists(path):
             raise DataTransferError(f"File not found: {path}")
 
@@ -110,7 +213,25 @@ class LocalFileConnector(BaseConnector):
                 # For CSV, we can't easily filter before reading without scanning. 
                 # We read in chunks to manage memory, then filter.
                 chunksize = kwargs.get("chunksize", 10000)
-                df_iter = pd.read_csv(path, chunksize=chunksize, skiprows=range(1, offset + 1) if offset else None)
+                skip_rows = range(1, offset + 1) if offset > 0 else None
+                df_iter = pd.read_csv(path, chunksize=chunksize, skiprows=skip_rows)
+            elif fmt == 'tsv':
+                chunksize = kwargs.get("chunksize", 10000)
+                skip_rows = range(1, offset + 1) if offset > 0 else None
+                df_iter = pd.read_csv(path, sep='\t', chunksize=chunksize, skiprows=skip_rows)
+            elif fmt == 'txt':
+                # Read as a single column named 'line'
+                chunksize = kwargs.get("chunksize", 10000)
+                skip_rows = range(offset) if offset > 0 else None
+                df_iter = pd.read_csv(path, sep='\n', header=None, names=['line'], chunksize=chunksize, skiprows=skip_rows)
+            elif fmt == 'xml':
+                try:
+                    df = pd.read_xml(path)
+                    df_iter = iter([self.slice_dataframe(df, offset, None)])
+                except ImportError:
+                    raise DataTransferError("XML support requires 'lxml'. Please install it.")
+                except Exception as ex:
+                    raise DataTransferError(f"Failed to read XML: {ex}")
             elif fmt == 'parquet':
                 df = pd.read_parquet(path)
                 df_iter = iter([self.slice_dataframe(df, offset, None)]) # Limit handled after filter
@@ -136,12 +257,12 @@ class LocalFileConnector(BaseConnector):
                     continue
                 
                 # Apply limit if it was passed (and not handled by read_csv natively for chunks)
-                if limit:
+                if limit is not None:
                     remaining = limit - rows_yielded
                     if remaining <= 0:
                         break
                     if len(df) > remaining:
-                        df = df.iloc[:remaining]
+                        df = df.iloc[:int(remaining)]
                 
                 rows_yielded += len(df)
                 yield df
@@ -181,6 +302,15 @@ class LocalFileConnector(BaseConnector):
                 
                 if fmt == 'csv':
                     df.to_csv(path, index=False, mode=write_mode, header=header)
+                elif fmt == 'tsv':
+                    df.to_csv(path, sep='\t', index=False, mode=write_mode, header=header)
+                elif fmt == 'txt':
+                     # Write first column as lines
+                     df.iloc[:, 0].to_csv(path, index=False, header=False, mode=write_mode)
+                elif fmt == 'xml':
+                    if clean_mode == 'append' and os.path.exists(path):
+                         raise DataTransferError("Appending to XML not efficiently supported. Use overwrite.")
+                    df.to_xml(path, index=False)
                 elif fmt == 'parquet':
                     # Parquet doesn't support 'a' mode directly in to_parquet
                     df.to_parquet(path, index=False)

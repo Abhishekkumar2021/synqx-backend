@@ -75,12 +75,21 @@ def execute_connection_query(
             config=config
         )
         
-        results = connector.execute_query(
-            query=request.query,
-            limit=request.limit,
-            offset=request.offset,
-            **(request.params or {})
-        )
+        try:
+            results = connector.execute_query(
+                query=request.query,
+                limit=request.limit,
+                offset=request.offset,
+                **(request.params or {})
+            )
+        except NotImplementedError:
+            # Fallback for file-based connectors where "query" is the file path/asset name
+            results = connector.fetch_sample(
+                asset=request.query,
+                limit=request.limit,
+                offset=request.offset,
+                **(request.params or {})
+            )
         
         columns = []
         if results and len(results) > 0:

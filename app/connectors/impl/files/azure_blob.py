@@ -5,7 +5,7 @@ import pandas as pd
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from app.connectors.base import BaseConnector
-from app.core.errors import ConfigurationError, ConnectionFailedError
+from app.core.errors import ConfigurationError, ConnectionFailedError, SchemaDiscoveryError
 from app.core.logging import get_logger
 
 try:
@@ -22,6 +22,9 @@ class AzureBlobConfig(BaseSettings):
     account_name: Optional[str] = Field(None, description="Storage Account Name")
     account_key: Optional[str] = Field(None, description="Storage Account Key")
     container_name: str = Field(..., description="Container Name")
+    recursive: bool = Field(True, description="Recursively search for files")
+    max_depth: Optional[int] = Field(None, ge=0, description="Maximum depth for recursion")
+    exclude_patterns: Optional[str] = Field(None, description="Comma-separated list of folders/files to exclude")
 
 class AzureBlobConnector(BaseConnector):
     def __init__(self, config: Dict[str, Any]):
@@ -79,14 +82,44 @@ class AzureBlobConnector(BaseConnector):
     ) -> List[Dict[str, Any]]:
         self.connect()
         assets = []
-        blobs = self._container_client.list_blobs(name_starts_with=kwargs.get("prefix"))
+        prefix = kwargs.get("prefix")
+        blobs = self._container_client.list_blobs(name_starts_with=prefix)
         
+        valid_extensions = {".csv", ".tsv", ".txt", ".xml", ".json", ".parquet", ".jsonl", ".avro", ".xls", ".xlsx"}
+        is_recursive = self._config_model.recursive
+        max_depth = self._config_model.max_depth
+        max_assets = 10000
+
+        ignored = {'.git', 'node_modules', '__pycache__', '.venv', 'venv'}
+        if self._config_model.exclude_patterns:
+            ignored.update({p.strip() for p in self._config_model.exclude_patterns.split(',') if p.strip()})
+
         for blob in blobs:
+            if len(assets) >= max_assets:
+                logger.warning(f"Reached max discovery limit of {max_assets} assets for container {self._config_model.container_name}")
+                break
+
+            # Depth check
+            rel_name = blob.name[len(prefix):] if prefix else blob.name
+            depth = len(rel_name.lstrip('/').split('/')) - 1
+            if max_depth is not None and depth > max_depth:
+                continue
+
             if pattern and pattern not in blob.name:
                 continue
             
+            # Exclude check
+            if any(ig in blob.name for ig in ignored):
+                continue
+
+            # If not recursive, ignore blobs in "subfolders"
+            if not is_recursive:
+                rel_path = blob.name[len(prefix):] if prefix else blob.name
+                if "/" in rel_path.lstrip("/"):
+                    continue
+
             ext = os.path.splitext(blob.name)[1].lower()
-            if ext in [".csv", ".json", ".parquet", ".jsonl"]:
+            if ext in valid_extensions:
                 asset = {
                     "name": blob.name,
                     "fully_qualified_name": f"{self._config_model.container_name}/{blob.name}",
@@ -102,43 +135,41 @@ class AzureBlobConnector(BaseConnector):
                 assets.append(asset)
         return assets
 
-    def infer_schema(self, asset: str, **kwargs) -> Dict[str, Any]:
+    def infer_schema(self, asset: str, sample_size: int = 1000, **kwargs) -> Dict[str, Any]:
         self.connect()
         try:
-            blob_client = self._container_client.get_blob_client(asset)
-            download_stream = blob_client.download_blob(offset=0, length=1024*1024) # First 1MB
-            data = download_stream.readall()
+            df_iter = self.read_batch(asset, limit=sample_size)
+            df = next(df_iter)
             
-            ext = os.path.splitext(asset)[1].lower()
-            bio = io.BytesIO(data)
-            
-            if ext == ".csv":
-                df = pd.read_csv(bio, nrows=100)
-            elif ext == ".parquet":
-                df = pd.read_parquet(bio)
-            elif ext in [".json", ".jsonl"]:
-                df = pd.read_json(bio, lines=(ext == ".jsonl"), nrows=100 if ext == ".jsonl" else None)
-            else:
-                return {"asset": asset, "columns": [], "type": "file"}
-
             columns = []
-            for col in df.columns:
-                dtype = str(df[col].dtype)
+            for col, dtype in df.dtypes.items():
                 col_type = "string"
-                if "int" in dtype: col_type = "integer"
-                elif "float" in dtype: col_type = "float"
-                elif "bool" in dtype: col_type = "boolean"
-                elif "datetime" in dtype: col_type = "datetime"
-                columns.append({"name": col, "type": col_type, "native_type": dtype})
-            
+                dtype_str = str(dtype).lower()
+                
+                if "int" in dtype_str: col_type = "integer"
+                elif "float" in dtype_str or "double" in dtype_str: col_type = "float"
+                elif "bool" in dtype_str: col_type = "boolean"
+                elif "datetime" in dtype_str: col_type = "datetime"
+                elif "object" in dtype_str:
+                    first_val = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
+                    if isinstance(first_val, (dict, list)):
+                        col_type = "json"
+                
+                columns.append({
+                    "name": col,
+                    "type": col_type,
+                    "native_type": str(dtype)
+                })
+
             return {
                 "asset": asset,
                 "columns": columns,
-                "type": "file"
+                "format": asset.split('.')[-1].lower() if '.' in asset else 'unknown',
+                "row_count_estimate": len(df)
             }
         except Exception as e:
             logger.error(f"Schema inference failed for Azure Blob {asset}: {e}")
-            return {"asset": asset, "columns": [], "type": "file"}
+            raise SchemaDiscoveryError(f"Azure Blob schema inference failed for {asset}: {e}")
 
     def read_batch(
         self,
@@ -163,34 +194,76 @@ class AzureBlobConnector(BaseConnector):
             reader = pd.read_csv(bio, chunksize=chunksize)
             rows = 0
             for df in reader:
-                if limit and rows + len(df) > limit:
-                    yield df.iloc[:limit - rows]
-                    break
+                if limit is not None:
+                    remaining = limit - rows
+                    if remaining <= 0:
+                        break
+                    if len(df) > remaining:
+                        df = df.iloc[:int(remaining)]
                 yield df
                 rows += len(df)
-                if limit and rows >= limit: break
+                if limit is not None and rows >= limit: break
         
+        elif ext == ".tsv":
+            reader = pd.read_csv(bio, sep='\t', chunksize=chunksize)
+            rows = 0
+            for df in reader:
+                if limit is not None:
+                    remaining = limit - rows
+                    if remaining <= 0:
+                        break
+                    if len(df) > remaining:
+                        df = df.iloc[:int(remaining)]
+                yield df
+                rows += len(df)
+                if limit is not None and rows >= limit: break
+
+        elif ext == ".txt":
+            reader = pd.read_csv(bio, sep='\n', header=None, names=['line'], chunksize=chunksize)
+            rows = 0
+            for df in reader:
+                if limit is not None:
+                    remaining = limit - rows
+                    if remaining <= 0:
+                        break
+                    if len(df) > remaining:
+                        df = df.iloc[:int(remaining)]
+                yield df
+                rows += len(df)
+                if limit is not None and rows >= limit: break
+
+        elif ext == ".xml":
+            df = pd.read_xml(bio)
+            df = self.slice_dataframe(df, offset, limit)
+            yield df
+
+        elif ext in (".xls", ".xlsx"):
+            df = pd.read_excel(bio)
+            df = self.slice_dataframe(df, offset, limit)
+            yield df
+
         elif ext == ".parquet":
             df = pd.read_parquet(bio)
-            if offset: df = df.iloc[offset:]
-            if limit: df = df.iloc[:limit]
+            df = self.slice_dataframe(df, offset, limit)
             yield df
             
         elif ext == ".jsonl":
             reader = pd.read_json(bio, lines=True, chunksize=chunksize)
             rows = 0
             for df in reader:
-                if limit and rows + len(df) > limit:
-                    yield df.iloc[:limit - rows]
-                    break
+                if limit is not None:
+                    remaining = limit - rows
+                    if remaining <= 0:
+                        break
+                    if len(df) > remaining:
+                        df = df.iloc[:int(remaining)]
                 yield df
                 rows += len(df)
-                if limit and rows >= limit: break
+                if limit is not None and rows >= limit: break
         
         elif ext == ".json":
             df = pd.read_json(bio)
-            if offset: df = df.iloc[offset:]
-            if limit: df = df.iloc[:limit]
+            df = self.slice_dataframe(df, offset, limit)
             yield df
 
     def write_batch(
